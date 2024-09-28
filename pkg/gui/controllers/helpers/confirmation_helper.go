@@ -28,9 +28,7 @@ func (self *ConfirmationHelper) wrappedConfirmationFunction(cancel goContext.Can
 	return func() error {
 		cancel()
 
-		if err := self.c.Context().Pop(); err != nil {
-			return err
-		}
+		self.c.Context().Pop()
 
 		if function != nil {
 			if err := function(); err != nil {
@@ -163,7 +161,7 @@ func (self *ConfirmationHelper) prepareConfirmationPanel(
 	self.c.Views().Confirmation.Wrap = !opts.Editable
 	self.c.Views().Confirmation.FgColor = theme.GocuiDefaultTextColor
 	self.c.Views().Confirmation.Mask = runeForMask(opts.Mask)
-	_ = self.c.Views().Confirmation.SetOrigin(0, 0)
+	self.c.Views().Confirmation.SetOrigin(0, 0)
 
 	suggestionsContext := self.c.Contexts().Suggestions
 	suggestionsContext.State.FindSuggestions = opts.FindSuggestionsFunc
@@ -185,7 +183,7 @@ func runeForMask(mask bool) rune {
 	return 0
 }
 
-func (self *ConfirmationHelper) CreatePopupPanel(ctx goContext.Context, opts types.CreatePopupPanelOpts) error {
+func (self *ConfirmationHelper) CreatePopupPanel(ctx goContext.Context, opts types.CreatePopupPanelOpts) {
 	self.c.Mutexes().PopupMutex.Lock()
 	defer self.c.Mutexes().PopupMutex.Unlock()
 
@@ -199,7 +197,7 @@ func (self *ConfirmationHelper) CreatePopupPanel(ctx goContext.Context, opts typ
 	if currentPopupOpts != nil && !currentPopupOpts.HasLoader {
 		self.c.Log.Error("ignoring create popup panel because a popup panel is already open")
 		cancel()
-		return nil
+		return
 	}
 
 	// remove any previous keybindings
@@ -223,7 +221,7 @@ func (self *ConfirmationHelper) CreatePopupPanel(ctx goContext.Context, opts typ
 		confirmationView.RenderTextArea()
 	} else {
 		self.c.ResetViewOrigin(confirmationView)
-		self.c.SetViewContent(confirmationView, style.AttrBold.Sprint(underlineLinks(opts.Prompt)))
+		self.c.SetViewContent(confirmationView, style.AttrBold.Sprint(opts.Prompt))
 	}
 
 	self.setKeyBindings(cancel, opts)
@@ -232,29 +230,7 @@ func (self *ConfirmationHelper) CreatePopupPanel(ctx goContext.Context, opts typ
 
 	self.c.State().GetRepoState().SetCurrentPopupOpts(&opts)
 
-	return self.c.Context().Push(self.c.Contexts().Confirmation)
-}
-
-func underlineLinks(text string) string {
-	result := ""
-	remaining := text
-	for {
-		linkStart := strings.Index(remaining, "https://")
-		if linkStart == -1 {
-			break
-		}
-
-		linkEnd := strings.IndexAny(remaining[linkStart:], " \n>")
-		if linkEnd == -1 {
-			linkEnd = len(remaining)
-		} else {
-			linkEnd += linkStart
-		}
-		underlinedLink := style.PrintSimpleHyperlink(remaining[linkStart:linkEnd])
-		result += remaining[:linkStart] + underlinedLink
-		remaining = remaining[linkEnd:]
-	}
-	return result + remaining
+	self.c.Context().Push(self.c.Contexts().Confirmation)
 }
 
 func (self *ConfirmationHelper) setKeyBindings(cancel goContext.CancelFunc, opts types.CreatePopupPanelOpts) {
@@ -366,11 +342,11 @@ func (self *ConfirmationHelper) layoutMenuPrompt(contentWidth int) int {
 		// We need to rerender to give the menu context a chance to update its
 		// non-model items, and reinitialize the data it uses for converting
 		// between view index and model index.
-		_ = self.c.Contexts().Menu.HandleRender()
+		self.c.Contexts().Menu.HandleRender()
 
 		// Then we need to refocus to ensure the cursor is in the right place in
 		// the view.
-		_ = self.c.Contexts().Menu.HandleFocus(types.OnFocusOpts{})
+		self.c.Contexts().Menu.HandleFocus(types.OnFocusOpts{})
 	}
 	return len(promptLines)
 }

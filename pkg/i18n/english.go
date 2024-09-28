@@ -107,6 +107,7 @@ type TranslationSet struct {
 	DeleteLocalBranch                     string
 	DeleteRemoteBranchOption              string
 	DeleteRemoteBranchPrompt              string
+	DeleteLocalAndRemoteBranchPrompt      string
 	ForceDeleteBranchTitle                string
 	ForceDeleteBranchMessage              string
 	RebaseBranch                          string
@@ -296,6 +297,7 @@ type TranslationSet struct {
 	ReflogCommitsTitle                    string
 	ConflictsResolved                     string
 	Continue                              string
+	UnstagedFilesAfterConflictsResolved   string
 	RebasingTitle                         string
 	RebasingFromBaseCommitTitle           string
 	SimpleRebase                          string
@@ -445,7 +447,6 @@ type TranslationSet struct {
 	ScrollRight                           string
 	DiscardPatch                          string
 	DiscardPatchConfirm                   string
-	DiscardPatchSameCommitConfirm         string
 	CantPatchWhileRebasingError           string
 	ToggleAddToPatch                      string
 	ToggleAddToPatchTooltip               string
@@ -472,8 +473,8 @@ type TranslationSet struct {
 	RemoveRemoteTooltip                   string
 	RemoveRemotePrompt                    string
 	DeleteRemoteBranch                    string
-	DeleteRemoteBranchMessage             string
 	DeleteRemoteBranchTooltip             string
+	DeleteLocalAndRemoteBranch            string
 	SetAsUpstream                         string
 	SetAsUpstreamTooltip                  string
 	SetUpstream                           string
@@ -582,6 +583,7 @@ type TranslationSet struct {
 	OpenCommandLogMenu                    string
 	OpenCommandLogMenuTooltip             string
 	ShowingGitDiff                        string
+	ShowingDiffForRange                   string
 	CommitDiff                            string
 	CopyCommitHashToClipboard             string
 	CommitHash                            string
@@ -848,7 +850,6 @@ type Actions struct {
 	CheckoutBranch                    string
 	ForceCheckoutBranch               string
 	DeleteLocalBranch                 string
-	DeleteBranch                      string
 	Merge                             string
 	SquashMerge                       string
 	RebaseBranch                      string
@@ -1087,6 +1088,7 @@ func EnglishTranslationSet() *TranslationSet {
 		DeleteLocalBranch:                    "Delete local branch",
 		DeleteRemoteBranchOption:             "Delete remote branch",
 		DeleteRemoteBranchPrompt:             "Are you sure you want to delete the remote branch '{{.selectedBranchName}}' from '{{.upstream}}'?",
+		DeleteLocalAndRemoteBranchPrompt:     "Are you sure you want to delete both '{{.localBranchName}}' from your machine, and '{{.remoteBranchName}}' from '{{.remoteName}}'?",
 		ForceDeleteBranchTitle:               "Force delete branch",
 		ForceDeleteBranchMessage:             "'{{.selectedBranchName}}' is not fully merged. Are you sure you want to delete it?",
 		RebaseBranch:                         "Rebase",
@@ -1278,6 +1280,7 @@ func EnglishTranslationSet() *TranslationSet {
 		GlobalTitle:                          "Global keybindings",
 		ConflictsResolved:                    "All merge conflicts resolved. Continue?",
 		Continue:                             "Continue",
+		UnstagedFilesAfterConflictsResolved:  "Files have been modified since conflicts were resolved. Auto-stage them and continue?",
 		Keybindings:                          "Keybindings",
 		KeybindingsMenuSectionLocal:          "Local",
 		KeybindingsMenuSectionGlobal:         "Global",
@@ -1435,7 +1438,6 @@ func EnglishTranslationSet() *TranslationSet {
 		ScrollRight:                          "Scroll right",
 		DiscardPatch:                         "Discard patch",
 		DiscardPatchConfirm:                  "You can only build a patch from one commit/stash-entry at a time. Discard current patch?",
-		DiscardPatchSameCommitConfirm:        "You currently have changes added to a patch for this commit. Discard current patch?",
 		CantPatchWhileRebasingError:          "You cannot build a patch or run patch commands while in a merging or rebasing state",
 		ToggleAddToPatch:                     "Toggle file included in patch",
 		ToggleAddToPatchTooltip:              "Toggle whether the file is included in the custom patch. See {{.doc}}.",
@@ -1460,10 +1462,10 @@ func EnglishTranslationSet() *TranslationSet {
 		EditRemoteUrl:                        `Enter updated remote url for {{.remoteName}}:`,
 		RemoveRemote:                         `Remove remote`,
 		RemoveRemoteTooltip:                  `Remove the selected remote. Any local branches tracking a remote branch from the remote will be unaffected.`,
-		RemoveRemotePrompt:                   "Are you sure you want to remove remote",
+		RemoveRemotePrompt:                   "Are you sure you want to remove remote?",
 		DeleteRemoteBranch:                   "Delete remote branch",
-		DeleteRemoteBranchMessage:            "Are you sure you want to delete remote branch",
 		DeleteRemoteBranchTooltip:            "Delete the remote branch from the remote.",
+		DeleteLocalAndRemoteBranch:           "Delete local and remote branch",
 		SetAsUpstream:                        "Set as upstream",
 		SetAsUpstreamTooltip:                 "Set the selected remote branch as the upstream of the checked-out branch.",
 		SetUpstream:                          "Set upstream of selected branch",
@@ -1479,7 +1481,7 @@ func EnglishTranslationSet() *TranslationSet {
 		ViewUpstreamRebaseOptionsTooltip:     "View options for rebasing the checked-out branch onto {{upstream}}. Note: this will not rebase the selected branch onto the upstream, it will rebase the checked-out branch onto the upstream.",
 		UpstreamGenericName:                  "upstream of selected branch",
 		SetUpstreamTitle:                     "Set upstream branch",
-		SetUpstreamMessage:                   "Are you sure you want to set the upstream branch of '{{.checkedOut}}' to '{{.selected}}'",
+		SetUpstreamMessage:                   "Are you sure you want to set the upstream branch of '{{.checkedOut}}' to '{{.selected}}'?",
 		EditRemoteTooltip:                    "Edit the selected remote's name or URL.",
 		TagCommit:                            "Tag commit",
 		TagCommitTooltip:                     "Create a new tag pointing at the selected commit. You'll be prompted to enter a tag name and optional description.",
@@ -1571,6 +1573,7 @@ func EnglishTranslationSet() *TranslationSet {
 		OpenCommandLogMenu:                       "View command log options",
 		OpenCommandLogMenuTooltip:                "View options for the command log e.g. show/hide the command log and focus the command log.",
 		ShowingGitDiff:                           "Showing output for:",
+		ShowingDiffForRange:                      "Showing diff for range",
 		CommitDiff:                               "Commit diff",
 		CopyCommitHashToClipboard:                "Copy commit hash to clipboard",
 		CommitHash:                               "Commit hash",
@@ -1795,7 +1798,6 @@ func EnglishTranslationSet() *TranslationSet {
 			CheckoutBranch:                 "Checkout branch",
 			ForceCheckoutBranch:            "Force checkout branch",
 			DeleteLocalBranch:              "Delete local branch",
-			DeleteBranch:                   "Delete branch",
 			Merge:                          "Merge",
 			SquashMerge:                    "Squash merge",
 			RebaseBranch:                   "Rebase branch",

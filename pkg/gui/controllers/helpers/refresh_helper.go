@@ -175,12 +175,12 @@ func (self *RefreshHelper) Refresh(options types.RefreshOptions) error {
 		if scopeSet.Includes(types.STAGING) {
 			refresh("staging", func() {
 				fileWg.Wait()
-				_ = self.stagingHelper.RefreshStagingPanel(types.OnFocusOpts{})
+				self.stagingHelper.RefreshStagingPanel(types.OnFocusOpts{})
 			})
 		}
 
 		if scopeSet.Includes(types.PATCH_BUILDING) {
-			refresh("patch building", func() { _ = self.patchBuildingHelper.RefreshPatchBuildingPanel(types.OnFocusOpts{}) })
+			refresh("patch building", func() { self.patchBuildingHelper.RefreshPatchBuildingPanel(types.OnFocusOpts{}) })
 		}
 
 		if scopeSet.Includes(types.MERGE_CONFLICTS) || scopeSet.Includes(types.FILES) {
@@ -285,8 +285,8 @@ func (self *RefreshHelper) refreshCommitsAndCommitFiles() {
 		// For now the awkwardness remains.
 		commit := self.c.Contexts().LocalCommits.GetSelected()
 		if commit != nil && commit.RefName() != "" {
-			self.c.Contexts().CommitFiles.SetRef(commit)
-			self.c.Contexts().CommitFiles.SetTitleRef(commit.RefName())
+			refRange := self.c.Contexts().LocalCommits.GetSelectedRefRangeForDiffFiles()
+			self.c.Contexts().CommitFiles.ReInit(commit, refRange)
 			_ = self.refreshCommitFilesContext()
 		}
 	}
@@ -387,9 +387,8 @@ func (self *RefreshHelper) RefreshAuthors(commits []*models.Commit) {
 }
 
 func (self *RefreshHelper) refreshCommitFilesContext() error {
-	ref := self.c.Contexts().CommitFiles.GetRef()
-	to := ref.RefName()
-	from, reverse := self.c.Modes().Diffing.GetFromAndReverseArgsForDiff(ref.ParentRefName())
+	from, to := self.c.Contexts().CommitFiles.GetFromAndToForDiff()
+	from, reverse := self.c.Modes().Diffing.GetFromAndReverseArgsForDiff(from)
 
 	files, err := self.c.Git().Loaders.CommitFileLoader.GetFilesInDiff(from, to, reverse)
 	if err != nil {
@@ -470,9 +469,7 @@ func (self *RefreshHelper) refreshBranches(refreshWorktrees bool, keepBranchSele
 		},
 		func() {
 			self.c.OnUIThread(func() error {
-				if err := self.c.Contexts().Branches.HandleRender(); err != nil {
-					self.c.Log.Error(err)
-				}
+				self.c.Contexts().Branches.HandleRender()
 				self.refreshStatus()
 				return nil
 			})
@@ -505,9 +502,7 @@ func (self *RefreshHelper) refreshBranches(refreshWorktrees bool, keepBranchSele
 	// Need to re-render the commits view because the visualization of local
 	// branch heads might have changed
 	self.c.Mutexes().LocalCommitsMutex.Lock()
-	if err := self.c.Contexts().LocalCommits.HandleRender(); err != nil {
-		self.c.Log.Error(err)
-	}
+	self.c.Contexts().LocalCommits.HandleRender()
 	self.c.Mutexes().LocalCommitsMutex.Unlock()
 
 	self.refreshStatus()
@@ -547,33 +542,35 @@ func (self *RefreshHelper) refreshFilesAndSubmodules() error {
 func (self *RefreshHelper) refreshStateFiles() error {
 	fileTreeViewModel := self.c.Contexts().Files.FileTreeViewModel
 
-	// If git thinks any of our files have inline merge conflicts, but they actually don't,
-	// we stage them.
-	// Note that if files with merge conflicts have both arisen and have been resolved
-	// between refreshes, we won't stage them here. This is super unlikely though,
-	// and this approach spares us from having to call `git status` twice in a row.
-	// Although this also means that at startup we won't be staging anything until
-	// we call git status again.
-	pathsToStage := []string{}
 	prevConflictFileCount := 0
-	for _, file := range self.c.Model().Files {
-		if file.HasMergeConflicts {
-			prevConflictFileCount++
-		}
-		if file.HasInlineMergeConflicts {
-			hasConflicts, err := mergeconflicts.FileHasConflictMarkers(file.Name)
-			if err != nil {
-				self.c.Log.Error(err)
-			} else if !hasConflicts {
-				pathsToStage = append(pathsToStage, file.Name)
+	if self.c.UserConfig().Git.AutoStageResolvedConflicts {
+		// If git thinks any of our files have inline merge conflicts, but they actually don't,
+		// we stage them.
+		// Note that if files with merge conflicts have both arisen and have been resolved
+		// between refreshes, we won't stage them here. This is super unlikely though,
+		// and this approach spares us from having to call `git status` twice in a row.
+		// Although this also means that at startup we won't be staging anything until
+		// we call git status again.
+		pathsToStage := []string{}
+		for _, file := range self.c.Model().Files {
+			if file.HasMergeConflicts {
+				prevConflictFileCount++
+			}
+			if file.HasInlineMergeConflicts {
+				hasConflicts, err := mergeconflicts.FileHasConflictMarkers(file.Name)
+				if err != nil {
+					self.c.Log.Error(err)
+				} else if !hasConflicts {
+					pathsToStage = append(pathsToStage, file.Name)
+				}
 			}
 		}
-	}
 
-	if len(pathsToStage) > 0 {
-		self.c.LogAction(self.c.Tr.Actions.StageResolvedFiles)
-		if err := self.c.Git().WorkingTree.StageFiles(pathsToStage); err != nil {
-			return err
+		if len(pathsToStage) > 0 {
+			self.c.LogAction(self.c.Tr.Actions.StageResolvedFiles)
+			if err := self.c.Git().WorkingTree.StageFiles(pathsToStage); err != nil {
+				return err
+			}
 		}
 	}
 

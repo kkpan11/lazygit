@@ -115,8 +115,8 @@ func (self *guiCommon) OnWorker(f func(gocui.Task) error) {
 	self.gui.onWorker(f)
 }
 
-func (self *guiCommon) RenderToMainViews(opts types.RefreshMainOpts) error {
-	return self.gui.refreshMainViews(opts)
+func (self *guiCommon) RenderToMainViews(opts types.RefreshMainOpts) {
+	self.gui.refreshMainViews(opts)
 }
 
 func (self *guiCommon) MainViewPairs() types.MainViewPairs {
@@ -138,6 +138,10 @@ func (self *guiCommon) KeybindingsOpts() types.KeybindingsOpts {
 
 func (self *guiCommon) CallKeybindingHandler(binding *types.Binding) error {
 	return self.gui.callKeybindingHandler(binding)
+}
+
+func (self *guiCommon) ResetKeybindings() error {
+	return self.gui.resetKeybindings()
 }
 
 func (self *guiCommon) IsAnyModeActive() bool {
