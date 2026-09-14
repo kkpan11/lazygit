@@ -48,8 +48,10 @@ var PullRebaseInteractiveConflict = NewIntegrationTest(NewIntegrationTestArgs{
 
 		t.Views().Commits().
 			Lines(
+				Contains("─── Pending rebase todos"),
 				Contains("pick").Contains("five"),
-				Contains("conflict").Contains("YOU ARE HERE").Contains("four"),
+				Contains("pick").Contains("CONFLICT").Contains("four").IsSelected(),
+				Contains("─── Commits"),
 				Contains("three"),
 				Contains("two"),
 				Contains("one"),
@@ -74,20 +76,19 @@ var PullRebaseInteractiveConflict = NewIntegrationTest(NewIntegrationTestArgs{
 			SelectNextItem().
 			PressPrimaryAction() // choose 'content4'
 
-		t.Common().ContinueOnConflictsResolved()
+		t.Common().ContinueOnConflictsResolved("rebase")
 
 		t.Views().Status().Content(Equals("↑2 repo → master"))
 
 		t.Views().Commits().
 			Focus().
 			Lines(
-				Contains("five").IsSelected(),
-				Contains("four"),
+				Contains("five"),
+				Contains("four").IsSelected(),
 				Contains("three"),
 				Contains("two"),
 				Contains("one"),
-			).
-			SelectNextItem()
+			)
 
 		t.Views().Main().
 			Content(

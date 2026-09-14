@@ -25,38 +25,22 @@ func NewContextTree(c *ContextCommon) *ContextTree {
 				Focusable:  true,
 			}),
 		),
-		Files:          NewWorkingTreeContext(c),
-		Submodules:     NewSubmodulesContext(c),
-		Menu:           NewMenuContext(c),
-		Remotes:        NewRemotesContext(c),
-		Worktrees:      NewWorktreesContext(c),
-		RemoteBranches: NewRemoteBranchesContext(c),
-		LocalCommits:   NewLocalCommitsContext(c),
-		CommitFiles:    commitFilesContext,
-		ReflogCommits:  NewReflogCommitsContext(c),
-		SubCommits:     NewSubCommitsContext(c),
-		Branches:       NewBranchesContext(c),
-		Tags:           NewTagsContext(c),
-		Stash:          NewStashContext(c),
-		Suggestions:    NewSuggestionsContext(c),
-		Normal: NewSimpleContext(
-			NewBaseContext(NewBaseContextOpts{
-				Kind:       types.MAIN_CONTEXT,
-				View:       c.Views().Main,
-				WindowName: "main",
-				Key:        NORMAL_MAIN_CONTEXT_KEY,
-				Focusable:  false,
-			}),
-		),
-		NormalSecondary: NewSimpleContext(
-			NewBaseContext(NewBaseContextOpts{
-				Kind:       types.MAIN_CONTEXT,
-				View:       c.Views().Secondary,
-				WindowName: "secondary",
-				Key:        NORMAL_SECONDARY_CONTEXT_KEY,
-				Focusable:  false,
-			}),
-		),
+		Files:           NewWorkingTreeContext(c),
+		Submodules:      NewSubmodulesContext(c),
+		Menu:            NewMenuContext(c),
+		Remotes:         NewRemotesContext(c),
+		Worktrees:       NewWorktreesContext(c),
+		RemoteBranches:  NewRemoteBranchesContext(c),
+		LocalCommits:    NewLocalCommitsContext(c),
+		CommitFiles:     commitFilesContext,
+		ReflogCommits:   NewReflogCommitsContext(c),
+		SubCommits:      NewSubCommitsContext(c),
+		Branches:        NewBranchesContext(c),
+		Tags:            NewTagsContext(c),
+		Stash:           NewStashContext(c),
+		Suggestions:     NewSuggestionsContext(c),
+		Normal:          NewMainContext(c.Views().Main, "main", NORMAL_MAIN_CONTEXT_KEY, c),
+		NormalSecondary: NewMainContext(c.Views().Secondary, "secondary", NORMAL_SECONDARY_CONTEXT_KEY, c),
 		Staging: NewPatchExplorerContext(
 			c.Views().Staging,
 			"main",
@@ -76,8 +60,11 @@ func NewContextTree(c *ContextCommon) *ContextTree {
 			"main",
 			PATCH_BUILDING_MAIN_CONTEXT_KEY,
 			func() []int {
-				filename := commitFilesContext.GetSelectedPath()
-				includedLineIndices, err := c.Git().Patch.PatchBuilder.GetFileIncLineIndices(filename)
+				file := commitFilesContext.GetSelectedFile()
+				if file == nil {
+					return nil
+				}
+				includedLineIndices, err := c.Git().Patch.PatchBuilder.GetFileIncLineIndices(file.Path, file.PreviousPath)
 				if err != nil {
 					c.Log.Error(err)
 					return nil
@@ -100,6 +87,7 @@ func NewContextTree(c *ContextCommon) *ContextTree {
 			c,
 		),
 		Confirmation:  NewConfirmationContext(c),
+		Prompt:        NewPromptContext(c),
 		CommitMessage: NewCommitMessageContext(c),
 		CommitDescription: NewSimpleContext(
 			NewBaseContext(NewBaseContextOpts{

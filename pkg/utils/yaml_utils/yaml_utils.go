@@ -1,95 +1,15 @@
 package yaml_utils
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"slices"
 
 	"gopkg.in/yaml.v3"
 )
 
-// takes a yaml document in bytes, a path to a key, and a value to set. The value must be a scalar.
-func UpdateYamlValue(yamlBytes []byte, path []string, value string) ([]byte, error) {
-	// Parse the YAML file.
-	var node yaml.Node
-	err := yaml.Unmarshal(yamlBytes, &node)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse YAML: %w", err)
-	}
-
-	// Empty document: need to create the top-level map ourselves
-	if len(node.Content) == 0 {
-		node.Content = append(node.Content, &yaml.Node{
-			Kind: yaml.MappingNode,
-		})
-	}
-
-	body := node.Content[0]
-
-	if body.Kind != yaml.MappingNode {
-		return yamlBytes, errors.New("yaml document is not a dictionary")
-	}
-
-	if didChange, err := updateYamlNode(body, path, value); err != nil || !didChange {
-		return yamlBytes, err
-	}
-
-	// Convert the updated YAML node back to YAML bytes.
-	updatedYAMLBytes, err := yaml.Marshal(body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to convert YAML node to bytes: %w", err)
-	}
-
-	return updatedYAMLBytes, nil
-}
-
-// Recursive function to update the YAML node.
-func updateYamlNode(node *yaml.Node, path []string, value string) (bool, error) {
-	if len(path) == 0 {
-		if node.Kind != yaml.ScalarNode {
-			return false, errors.New("yaml node is not a scalar")
-		}
-		if node.Value != value {
-			node.Value = value
-			return true, nil
-		}
-		return false, nil
-	}
-
-	if node.Kind != yaml.MappingNode {
-		return false, errors.New("yaml node in path is not a dictionary")
-	}
-
-	key := path[0]
-	if _, valueNode := lookupKey(node, key); valueNode != nil {
-		return updateYamlNode(valueNode, path[1:], value)
-	}
-
-	// if the key doesn't exist, we'll add it
-
-	// at end of path: add the new key, done
-	if len(path) == 1 {
-		node.Content = append(node.Content, &yaml.Node{
-			Kind:  yaml.ScalarNode,
-			Value: key,
-		}, &yaml.Node{
-			Kind:  yaml.ScalarNode,
-			Value: value,
-		})
-		return true, nil
-	}
-
-	// otherwise, create the missing intermediate node and continue
-	newNode := &yaml.Node{
-		Kind: yaml.MappingNode,
-	}
-	node.Content = append(node.Content, &yaml.Node{
-		Kind:  yaml.ScalarNode,
-		Value: key,
-	}, newNode)
-	return updateYamlNode(newNode, path[1:], value)
-}
-
-func lookupKey(node *yaml.Node, key string) (*yaml.Node, *yaml.Node) {
+func LookupKey(node *yaml.Node, key string) (*yaml.Node, *yaml.Node) {
 	for i := 0; i < len(node.Content)-1; i += 2 {
 		if node.Content[i].Value == key {
 			return node.Content[i], node.Content[i+1]
@@ -99,98 +19,219 @@ func lookupKey(node *yaml.Node, key string) (*yaml.Node, *yaml.Node) {
 	return nil, nil
 }
 
-// takes a yaml document in bytes, a path to a key, and a new name for the key.
-// Will rename the key to the new name if it exists, and do nothing otherwise.
-func RenameYamlKey(yamlBytes []byte, path []string, newKey string) ([]byte, error) {
-	// Parse the YAML file.
-	var node yaml.Node
-	err := yaml.Unmarshal(yamlBytes, &node)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse YAML: %w", err)
+// Returns the key and value if they were present
+func RemoveKey(node *yaml.Node, key string) (*yaml.Node, *yaml.Node) {
+	for i := 0; i < len(node.Content)-1; i += 2 {
+		if node.Content[i].Value == key {
+			key, value := node.Content[i], node.Content[i+1]
+			node.Content = slices.Delete(node.Content, i, i+2)
+			return key, value
+		}
 	}
 
+	return nil, nil
+}
+
+// Adds a string field to the given object. Caution: doesn't check for duplicate
+// keys, that's the caller's responsibility
+func AddStringKey(mappingNode *yaml.Node, key string, value string) {
+	keyNode := &yaml.Node{
+		Kind:  yaml.ScalarNode,
+		Tag:   "!!str",
+		Value: key,
+	}
+	valueNode := &yaml.Node{
+		Kind:  yaml.ScalarNode,
+		Tag:   "!!str",
+		Value: value,
+	}
+
+	mappingNode.Content = append(mappingNode.Content, keyNode, valueNode)
+}
+
+// Walks a yaml document from the root node to the specified path, and then applies the transformation to that node.
+// If the requested path is not defined in the document, no changes are made to the document.
+func TransformNode(rootNode *yaml.Node, path []string, transform func(node *yaml.Node) error) error {
 	// Empty document: nothing to do.
-	if len(node.Content) == 0 {
-		return yamlBytes, nil
+	if len(rootNode.Content) == 0 {
+		return nil
 	}
 
-	body := node.Content[0]
+	body := rootNode.Content[0]
 
-	if didRename, err := renameYamlKey(body, path, newKey); err != nil || !didRename {
-		return yamlBytes, err
+	if err := transformNode(body, path, transform); err != nil {
+		return err
 	}
 
-	// Convert the updated YAML node back to YAML bytes.
-	updatedYAMLBytes, err := yaml.Marshal(body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to convert YAML node to bytes: %w", err)
+	return nil
+}
+
+// A recursive function to walk down the tree. See TransformNode for more details.
+func transformNode(node *yaml.Node, path []string, transform func(node *yaml.Node) error) error {
+	if len(path) == 0 {
+		return transform(node)
 	}
 
-	return updatedYAMLBytes, nil
+	keyNode, valueNode := LookupKey(node, path[0])
+	if keyNode == nil {
+		return nil
+	}
+
+	return transformNode(valueNode, path[1:], transform)
+}
+
+// Takes the root node of a yaml document, a path to a key, and a new name for the key.
+// Will rename the key to the new name if it exists, and do nothing otherwise.
+func RenameYamlKey(rootNode *yaml.Node, path []string, newKey string) (error, bool) {
+	// Empty document: nothing to do.
+	if len(rootNode.Content) == 0 {
+		return nil, false
+	}
+
+	body := rootNode.Content[0]
+
+	return renameYamlKey(body, path, newKey)
 }
 
 // Recursive function to rename the YAML key.
-func renameYamlKey(node *yaml.Node, path []string, newKey string) (bool, error) {
+func renameYamlKey(node *yaml.Node, path []string, newKey string) (error, bool) {
 	if node.Kind != yaml.MappingNode {
-		return false, errors.New("yaml node in path is not a dictionary")
+		return errors.New("yaml node in path is not a dictionary"), false
 	}
 
-	keyNode, valueNode := lookupKey(node, path[0])
+	keyNode, valueNode := LookupKey(node, path[0])
 	if keyNode == nil {
-		return false, nil
+		return nil, false
 	}
 
 	// end of path reached: rename key
 	if len(path) == 1 {
 		// Check that new key doesn't exist yet
-		if newKeyNode, _ := lookupKey(node, newKey); newKeyNode != nil {
-			return false, fmt.Errorf("new key `%s' already exists", newKey)
+		if newKeyNode, _ := LookupKey(node, newKey); newKeyNode != nil {
+			return fmt.Errorf("new key `%s' already exists", newKey), false
 		}
 
 		keyNode.Value = newKey
-		return true, nil
+		return nil, true
 	}
 
 	return renameYamlKey(valueNode, path[1:], newKey)
 }
 
-// Traverses a yaml document, calling the callback function for each node. The
-// callback is allowed to modify the node in place, in which case it should
-// return true. The function returns the original yaml document if none of the
-// callbacks returned true, and the modified document otherwise.
-func Walk(yamlBytes []byte, callback func(node *yaml.Node, path string) bool) ([]byte, error) {
-	// Parse the YAML file.
-	var node yaml.Node
-	err := yaml.Unmarshal(yamlBytes, &node)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse YAML: %w", err)
-	}
-
+// Takes the root node of a yaml document, the path to an existing key, and the
+// path at which it should live instead. If the key exists, it (and its value)
+// is moved to the new path, creating intermediate mapping nodes as needed, and
+// any mapping nodes left empty behind it are removed. Does nothing if the key
+// at oldPath doesn't exist. Returns an error if a key already exists at newPath,
+// or if a node along either path exists but isn't a mapping.
+func MoveYamlKey(rootNode *yaml.Node, oldPath []string, newPath []string) (error, bool) {
 	// Empty document: nothing to do.
-	if len(node.Content) == 0 {
-		return yamlBytes, nil
+	if len(rootNode.Content) == 0 {
+		return nil, false
 	}
 
-	body := node.Content[0]
+	body := rootNode.Content[0]
 
-	if didChange, err := walk(body, "", callback); err != nil || !didChange {
-		return yamlBytes, err
-	}
-
-	// Convert the updated YAML node back to YAML bytes.
-	updatedYAMLBytes, err := yaml.Marshal(body)
+	// Bail out early if there's nothing to move.
+	oldParent, err := findContainingMap(body, oldPath, false)
 	if err != nil {
-		return nil, fmt.Errorf("failed to convert YAML node to bytes: %w", err)
+		return err, false
+	}
+	if oldParent == nil {
+		return nil, false
+	}
+	keyNode, valueNode := LookupKey(oldParent, oldPath[len(oldPath)-1])
+	if keyNode == nil {
+		return nil, false
 	}
 
-	return updatedYAMLBytes, nil
+	// Find or create the destination map, and make sure it's free.
+	newParent, err := findContainingMap(body, newPath, true)
+	if err != nil {
+		return err, false
+	}
+	newKey := newPath[len(newPath)-1]
+	if existing, _ := LookupKey(newParent, newKey); existing != nil {
+		return fmt.Errorf("new key `%s' already exists", newKey), false
+	}
+
+	// Move the key, then prune any maps that became empty behind it. The
+	// destination is populated first so that a map shared by both paths isn't
+	// mistaken for empty during pruning.
+	RemoveKey(oldParent, oldPath[len(oldPath)-1])
+	keyNode.Value = newKey
+	newParent.Content = append(newParent.Content, keyNode, valueNode)
+	removeEmptyMaps(body, oldPath[:len(oldPath)-1])
+
+	return nil, true
 }
 
-func walk(node *yaml.Node, path string, callback func(*yaml.Node, string) bool) (bool, error) {
-	didChange := callback(node, path)
+// Descends path (excluding its final element) and returns the mapping node that
+// should directly contain that final element. With create set, missing
+// intermediate maps are created; otherwise a missing intermediate yields a nil
+// result. Returns an error if a node along the path exists but isn't a mapping.
+func findContainingMap(node *yaml.Node, path []string, create bool) (*yaml.Node, error) {
+	for _, key := range path[:len(path)-1] {
+		if node.Kind != yaml.MappingNode {
+			return nil, errors.New("yaml node in path is not a dictionary")
+		}
+		_, valueNode := LookupKey(node, key)
+		if valueNode == nil {
+			if !create {
+				return nil, nil
+			}
+			valueNode = &yaml.Node{Kind: yaml.MappingNode}
+			node.Content = append(node.Content,
+				&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key},
+				valueNode)
+		}
+		node = valueNode
+	}
+	if node.Kind != yaml.MappingNode {
+		return nil, errors.New("yaml node in path is not a dictionary")
+	}
+	return node, nil
+}
+
+// Walks path from node and removes any mapping that is empty once its child has
+// been removed, cascading upward. Stops at the first non-empty ancestor (which
+// keeps every ancestor above it non-empty too).
+func removeEmptyMaps(node *yaml.Node, path []string) {
+	if len(path) == 0 {
+		return
+	}
+	_, child := LookupKey(node, path[0])
+	if child == nil {
+		return
+	}
+	removeEmptyMaps(child, path[1:])
+	if child.Kind == yaml.MappingNode && len(child.Content) == 0 {
+		RemoveKey(node, path[0])
+	}
+}
+
+// Traverses a yaml document, calling the callback function for each node. The
+// callback is expected to modify the node in place
+func Walk(rootNode *yaml.Node, callback func(node *yaml.Node, path string)) error {
+	// Empty document: nothing to do.
+	if len(rootNode.Content) == 0 {
+		return nil
+	}
+
+	body := rootNode.Content[0]
+
+	if err := walk(body, "", callback); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func walk(node *yaml.Node, path string, callback func(*yaml.Node, string)) error {
+	callback(node, path)
 	switch node.Kind {
 	case yaml.DocumentNode:
-		return false, errors.New("Unexpected document node in the middle of a yaml tree")
+		return errors.New("Unexpected document node in the middle of a yaml tree")
 	case yaml.MappingNode:
 		for i := 0; i < len(node.Content); i += 2 {
 			name := node.Content[i].Value
@@ -201,26 +242,33 @@ func walk(node *yaml.Node, path string, callback func(*yaml.Node, string) bool) 
 			} else {
 				childPath = fmt.Sprintf("%s.%s", path, name)
 			}
-			didChangeChild, err := walk(childNode, childPath, callback)
+			err := walk(childNode, childPath, callback)
 			if err != nil {
-				return false, err
+				return err
 			}
-			didChange = didChange || didChangeChild
 		}
 	case yaml.SequenceNode:
-		for i := 0; i < len(node.Content); i++ {
+		for i := range len(node.Content) {
 			childPath := fmt.Sprintf("%s[%d]", path, i)
-			didChangeChild, err := walk(node.Content[i], childPath, callback)
+			err := walk(node.Content[i], childPath, callback)
 			if err != nil {
-				return false, err
+				return err
 			}
-			didChange = didChange || didChangeChild
 		}
 	case yaml.ScalarNode:
 		// nothing to do
 	case yaml.AliasNode:
-		return false, errors.New("Alias nodes are not supported")
+		return errors.New("Alias nodes are not supported")
 	}
 
-	return didChange, nil
+	return nil
+}
+
+func YamlMarshal(node *yaml.Node) ([]byte, error) {
+	var buffer bytes.Buffer
+	encoder := yaml.NewEncoder(&buffer)
+	encoder.SetIndent(2)
+
+	err := encoder.Encode(node)
+	return buffer.Bytes(), err
 }

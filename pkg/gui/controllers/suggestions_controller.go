@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"github.com/jesseduffield/lazygit/pkg/gocui"
 	"github.com/jesseduffield/lazygit/pkg/gui/context"
 	"github.com/jesseduffield/lazygit/pkg/gui/types"
 )
@@ -18,7 +19,7 @@ func NewSuggestionsController(
 ) *SuggestionsController {
 	return &SuggestionsController{
 		baseController: baseController{},
-		ListControllerTrait: NewListControllerTrait[*types.Suggestion](
+		ListControllerTrait: NewListControllerTrait(
 			c,
 			c.Contexts().Suggestions,
 			c.Contexts().Suggestions.GetSelected,
@@ -31,34 +32,34 @@ func NewSuggestionsController(
 func (self *SuggestionsController) GetKeybindings(opts types.KeybindingsOpts) []*types.Binding {
 	bindings := []*types.Binding{
 		{
-			Key:               opts.GetKey(opts.Config.Universal.Confirm),
+			Keys:              opts.GetKeys(opts.Config.Universal.ConfirmSuggestion),
 			Handler:           func() error { return self.context().State.OnConfirm() },
 			GetDisabledReason: self.require(self.singleItemSelected()),
 		},
 		{
-			Key:     opts.GetKey(opts.Config.Universal.Return),
+			Keys:    opts.GetKeys(opts.Config.Universal.Return),
 			Handler: func() error { return self.context().State.OnClose() },
 		},
 		{
-			Key:     opts.GetKey(opts.Config.Universal.TogglePanel),
-			Handler: self.switchToConfirmation,
+			Keys:    opts.GetKeys(opts.Config.Universal.TogglePanel),
+			Handler: self.switchToPrompt,
 		},
 		{
-			Key: opts.GetKey(opts.Config.Universal.Remove),
+			Keys: opts.GetKeys(opts.Config.Universal.Remove),
 			Handler: func() error {
 				return self.context().State.OnDeleteSuggestion()
 			},
 		},
 		{
-			Key: opts.GetKey(opts.Config.Universal.Edit),
+			Keys: opts.GetKeys(opts.Config.Universal.Edit),
 			Handler: func() error {
 				if self.context().State.AllowEditSuggestion {
 					if selectedItem := self.c.Contexts().Suggestions.GetSelected(); selectedItem != nil {
-						self.c.Contexts().Confirmation.GetView().TextArea.Clear()
-						self.c.Contexts().Confirmation.GetView().TextArea.TypeString(selectedItem.Value)
-						self.c.Contexts().Confirmation.GetView().RenderTextArea()
+						self.c.Contexts().Prompt.GetView().TextArea.Clear()
+						self.c.Contexts().Prompt.GetView().TextArea.TypeString(selectedItem.Value)
+						self.c.Contexts().Prompt.GetView().RenderTextArea()
 						self.c.Contexts().Suggestions.RefreshSuggestions()
-						return self.switchToConfirmation()
+						return self.switchToPrompt()
 					}
 				}
 				return nil
@@ -69,16 +70,28 @@ func (self *SuggestionsController) GetKeybindings(opts types.KeybindingsOpts) []
 	return bindings
 }
 
-func (self *SuggestionsController) switchToConfirmation() error {
-	self.c.Views().Suggestions.Subtitle = ""
-	self.c.Views().Suggestions.Highlight = false
-	return self.c.Context().Replace(self.c.Contexts().Confirmation)
+func (self *SuggestionsController) GetMouseKeybindings(opts types.KeybindingsOpts) []*gocui.ViewMouseBinding {
+	return []*gocui.ViewMouseBinding{
+		{
+			ViewName:    self.c.Contexts().Prompt.GetViewName(),
+			FocusedView: self.c.Contexts().Suggestions.GetViewName(),
+			Key:         gocui.MouseLeft,
+			Handler: func(gocui.ViewMouseBindingOpts) error {
+				return self.switchToPrompt()
+			},
+		},
+	}
 }
 
-func (self *SuggestionsController) GetOnFocusLost() func(types.OnFocusLostOpts) error {
-	return func(types.OnFocusLostOpts) error {
-		self.c.Helpers().Confirmation.DeactivateConfirmationPrompt()
-		return nil
+func (self *SuggestionsController) switchToPrompt() error {
+	self.c.Views().Suggestions.Subtitle = ""
+	self.c.Context().Replace(self.c.Contexts().Prompt)
+	return nil
+}
+
+func (self *SuggestionsController) GetOnFocusLost() func(types.OnFocusLostOpts) {
+	return func(types.OnFocusLostOpts) {
+		self.c.Helpers().Confirmation.DeactivatePrompt()
 	}
 }
 

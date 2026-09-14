@@ -3,7 +3,7 @@ package helpers
 import (
 	"errors"
 
-	"github.com/jesseduffield/gocui"
+	"github.com/jesseduffield/lazygit/pkg/gocui"
 	"github.com/jesseduffield/lazygit/pkg/gui/types"
 	"github.com/jesseduffield/lazygit/pkg/updates"
 	"github.com/jesseduffield/lazygit/pkg/utils"
@@ -75,7 +75,8 @@ func (self *UpdateHelper) onUpdateFinish(err error) error {
 			)
 			return errors.New(errMessage)
 		}
-		return self.c.Alert(self.c.Tr.UpdateCompletedTitle, self.c.Tr.UpdateCompleted)
+		self.c.Alert(self.c.Tr.UpdateCompletedTitle, self.c.Tr.UpdateCompleted)
+		return nil
 	})
 
 	return nil
@@ -88,7 +89,7 @@ func (self *UpdateHelper) showUpdatePrompt(newVersion string) error {
 		},
 	)
 
-	return self.c.Confirm(types.ConfirmOpts{
+	self.c.Confirm(types.ConfirmOpts{
 		Title:  self.c.Tr.UpdateAvailableTitle,
 		Prompt: message,
 		HandleConfirm: func() error {
@@ -96,4 +97,6 @@ func (self *UpdateHelper) showUpdatePrompt(newVersion string) error {
 			return nil
 		},
 	})
+
+	return nil
 }

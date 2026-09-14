@@ -115,7 +115,7 @@ func TestListRenderer_renderLines(t *testing.T) {
 	}
 	for _, s := range scenarios {
 		t.Run(s.name, func(t *testing.T) {
-			viewModel := NewListViewModel[mystring](func() []mystring { return s.modelStrings })
+			viewModel := NewListViewModel(func() []mystring { return s.modelStrings })
 			var getNonModelItems func() []*NonModelItem
 			if s.nonModelIndices != nil {
 				getNonModelItems = func() []*NonModelItem {
@@ -236,7 +236,7 @@ func TestListRenderer_ModelIndexToViewIndex_and_back(t *testing.T) {
 			assert.Equal(t, len(s.viewIndices), len(s.expectedModelIndices))
 
 			modelInts := lo.Map(lo.Range(s.numModelItems), func(i int, _ int) myint { return myint(i) })
-			viewModel := NewListViewModel[myint](func() []myint { return modelInts })
+			viewModel := NewListViewModel(func() []myint { return modelInts })
 			var getNonModelItems func() []*NonModelItem
 			if s.nonModelIndices != nil {
 				getNonModelItems = func() []*NonModelItem {
@@ -254,16 +254,37 @@ func TestListRenderer_ModelIndexToViewIndex_and_back(t *testing.T) {
 				getNonModelItems: getNonModelItems,
 			}
 
-			// Need to render first so that it knows the non-model items
-			self.renderLines(-1, -1)
-
-			for i := 0; i < len(s.modelIndices); i++ {
+			for i := range len(s.modelIndices) {
 				assert.Equal(t, s.expectedViewIndices[i], self.ModelIndexToViewIndex(s.modelIndices[i]))
 			}
 
-			for i := 0; i < len(s.viewIndices); i++ {
+			for i := range len(s.viewIndices) {
 				assert.Equal(t, s.expectedModelIndices[i], self.ViewIndexToModelIndex(s.viewIndices[i]))
 			}
 		})
 	}
+}
+
+// The index conversions must not depend on the list having been rendered
+// first. It used to be renderLines that populated the conversion arrays, so
+// converting an index before the first render silently ignored the non-model
+// items (and converting after the model changed used a stale snapshot).
+func TestListRenderer_IndexConversionsAreRenderIndependent(t *testing.T) {
+	modelInts := lo.Map(lo.Range(3), func(i int, _ int) myint { return myint(i) })
+	self := &ListRenderer{
+		list: NewListViewModel(func() []myint { return modelInts }),
+		getDisplayStrings: func(startIdx int, endIdx int) [][]string {
+			return lo.Map(modelInts[startIdx:endIdx],
+				func(i myint, _ int) []string { return []string{fmt.Sprint(i)} })
+		},
+		// A section header sits at model index 1, so model item 1 is pushed down
+		// to view index 2, and view index 2 maps back to model item 1.
+		getNonModelItems: func() []*NonModelItem {
+			return []*NonModelItem{{Index: 1, Content: "--- header ---"}}
+		},
+	}
+
+	// Deliberately convert without rendering first.
+	assert.Equal(t, 2, self.ModelIndexToViewIndex(1))
+	assert.Equal(t, 1, self.ViewIndexToModelIndex(2))
 }

@@ -1,7 +1,6 @@
 package controllers
 
 import (
-	"github.com/jesseduffield/gocui"
 	"github.com/jesseduffield/lazygit/pkg/gui/types"
 )
 
@@ -36,12 +35,8 @@ func NewSideWindowController(
 
 func (self *SideWindowController) GetKeybindings(opts types.KeybindingsOpts) []*types.Binding {
 	return []*types.Binding{
-		{Key: opts.GetKey(opts.Config.Universal.PrevBlock), Modifier: gocui.ModNone, Handler: self.previousSideWindow},
-		{Key: opts.GetKey(opts.Config.Universal.NextBlock), Modifier: gocui.ModNone, Handler: self.nextSideWindow},
-		{Key: opts.GetKey(opts.Config.Universal.PrevBlockAlt), Modifier: gocui.ModNone, Handler: self.previousSideWindow},
-		{Key: opts.GetKey(opts.Config.Universal.NextBlockAlt), Modifier: gocui.ModNone, Handler: self.nextSideWindow},
-		{Key: opts.GetKey(opts.Config.Universal.PrevBlockAlt2), Modifier: gocui.ModNone, Handler: self.previousSideWindow},
-		{Key: opts.GetKey(opts.Config.Universal.NextBlockAlt2), Modifier: gocui.ModNone, Handler: self.nextSideWindow},
+		{Keys: opts.GetKeys(opts.Config.Universal.PrevBlock), Handler: self.previousSideWindow},
+		{Keys: opts.GetKeys(opts.Config.Universal.NextBlock), Handler: self.nextSideWindow},
 	}
 }
 
@@ -69,7 +64,8 @@ func (self *SideWindowController) previousSideWindow() error {
 
 	context := self.c.Helpers().Window.GetContextForWindow(newWindow)
 
-	return self.c.Context().Push(context)
+	self.c.Context().Push(context, types.OnFocusOpts{})
+	return nil
 }
 
 func (self *SideWindowController) nextSideWindow() error {
@@ -92,5 +88,6 @@ func (self *SideWindowController) nextSideWindow() error {
 
 	context := self.c.Helpers().Window.GetContextForWindow(newWindow)
 
-	return self.c.Context().Push(context)
+	self.c.Context().Push(context, types.OnFocusOpts{})
+	return nil
 }

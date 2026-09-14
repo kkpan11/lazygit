@@ -27,3 +27,9 @@ func (self *FakeGitConfig) GetGeneral(args string) string {
 func (self *FakeGitConfig) GetBool(key string) bool {
 	return isTruthy(self.Get(key))
 }
+
+func (self *FakeGitConfig) SetDir(dir string) {
+}
+
+func (self *FakeGitConfig) DropCache() {
+}

@@ -1,9 +1,12 @@
 package gui
 
 import (
+	"errors"
 	"fmt"
 
-	"github.com/jesseduffield/gocui"
+	"github.com/jesseduffield/lazygit/pkg/config"
+	"github.com/jesseduffield/lazygit/pkg/gocui"
+	"github.com/jesseduffield/lazygit/pkg/gui/context"
 	"github.com/jesseduffield/lazygit/pkg/theme"
 	"github.com/samber/lo"
 )
@@ -63,8 +66,15 @@ func (gui *Gui) orderedViewNameMappings() []viewNameMapping {
 		{viewPtr: &gui.Views.CommitMessage, name: "commitMessage"},
 		{viewPtr: &gui.Views.CommitDescription, name: "commitDescription"},
 		{viewPtr: &gui.Views.Menu, name: "menu"},
+		// the filter row of a menu that filters as you type: a frame that hangs off
+		// the bottom of the menu and shows the "Filter:" prompt, plus the input
+		// field that sits inside it. Both must come after the menu so that the row's
+		// top border is drawn over the menu's bottom border.
+		{viewPtr: &gui.Views.MenuFilterFrame, name: "menuFilterFrame"},
+		{viewPtr: &gui.Views.MenuFilter, name: "menuFilter"},
 		{viewPtr: &gui.Views.Suggestions, name: "suggestions"},
 		{viewPtr: &gui.Views.Confirmation, name: "confirmation"},
+		{viewPtr: &gui.Views.Prompt, name: "prompt"},
 		{viewPtr: &gui.Views.Tooltip, name: "tooltip"},
 
 		// this guy will cover everything else when it appears
@@ -76,7 +86,7 @@ func (gui *Gui) createAllViews() error {
 	var err error
 	for _, mapping := range gui.orderedViewNameMappings() {
 		*mapping.viewPtr, err = gui.prepareView(mapping.name)
-		if err != nil && !gocui.IsUnknownView(err) {
+		if err != nil && !errors.Is(err, gocui.ErrUnknownView) {
 			return err
 		}
 	}
@@ -86,7 +96,6 @@ func (gui *Gui) createAllViews() error {
 	gui.Views.SearchPrefix.BgColor = gocui.ColorDefault
 	gui.Views.SearchPrefix.FgColor = gocui.ColorCyan
 	gui.Views.SearchPrefix.Frame = false
-	gui.c.SetViewContent(gui.Views.SearchPrefix, gui.Tr.SearchPrefix)
 
 	gui.Views.StatusSpacer1.Frame = false
 	gui.Views.StatusSpacer2.Frame = false
@@ -97,48 +106,18 @@ func (gui *Gui) createAllViews() error {
 	gui.Views.Search.Frame = false
 	gui.Views.Search.Editor = gocui.EditorFunc(gui.searchEditor)
 
-	gui.Views.Stash.Title = gui.c.Tr.StashTitle
-
-	gui.Views.Commits.Title = gui.c.Tr.CommitsTitle
-
-	gui.Views.CommitFiles.Title = gui.c.Tr.CommitFiles
-
-	gui.Views.Branches.Title = gui.c.Tr.BranchesTitle
-
-	gui.Views.Remotes.Title = gui.c.Tr.RemotesTitle
-
-	gui.Views.Worktrees.Title = gui.c.Tr.WorktreesTitle
-
-	gui.Views.Tags.Title = gui.c.Tr.TagsTitle
-
-	gui.Views.Files.Title = gui.c.Tr.FilesTitle
-
 	for _, view := range []*gocui.View{gui.Views.Main, gui.Views.Secondary, gui.Views.Staging, gui.Views.StagingSecondary, gui.Views.PatchBuilding, gui.Views.PatchBuildingSecondary, gui.Views.MergeConflicts} {
-		view.Title = gui.c.Tr.DiffTitle
 		view.Wrap = true
-		view.IgnoreCarriageReturns = true
 		view.UnderlineHyperLinksOnlyOnHover = true
+		view.AutoRenderHyperLinks = true
 	}
 
-	gui.Views.Staging.Title = gui.c.Tr.UnstagedChanges
 	gui.Views.Staging.Wrap = true
-
-	gui.Views.StagingSecondary.Title = gui.c.Tr.StagedChanges
 	gui.Views.StagingSecondary.Wrap = true
-
-	gui.Views.PatchBuilding.Title = gui.Tr.Patch
 	gui.Views.PatchBuilding.Wrap = true
-
-	gui.Views.PatchBuildingSecondary.Title = gui.Tr.CustomPatch
 	gui.Views.PatchBuildingSecondary.Wrap = true
-
-	gui.Views.MergeConflicts.Title = gui.c.Tr.MergeConflictsTitle
 	gui.Views.MergeConflicts.Wrap = false
-
-	gui.Views.Limit.Title = gui.c.Tr.NotEnoughSpace
 	gui.Views.Limit.Wrap = true
-
-	gui.Views.Status.Title = gui.c.Tr.StatusTitle
 
 	gui.Views.AppStatus.BgColor = gocui.ColorDefault
 	gui.Views.AppStatus.FgColor = gocui.ColorCyan
@@ -146,47 +125,76 @@ func (gui *Gui) createAllViews() error {
 	gui.Views.AppStatus.Frame = false
 
 	gui.Views.CommitMessage.Visible = false
-	gui.Views.CommitMessage.Title = gui.c.Tr.CommitSummary
 	gui.Views.CommitMessage.Editable = true
 	gui.Views.CommitMessage.Editor = gocui.EditorFunc(gui.commitMessageEditor)
 
 	gui.Views.CommitDescription.Visible = false
-	gui.Views.CommitDescription.Title = gui.c.Tr.CommitDescriptionTitle
 	gui.Views.CommitDescription.Editable = true
 	gui.Views.CommitDescription.Editor = gocui.EditorFunc(gui.commitDescriptionEditor)
 
 	gui.Views.Confirmation.Visible = false
-	gui.Views.Confirmation.Editor = gocui.EditorFunc(gui.promptEditor)
+	gui.Views.Confirmation.Wrap = true
+	gui.Views.Confirmation.AutoRenderHyperLinks = true
+
+	gui.Views.Prompt.Visible = false
+	gui.Views.Prompt.Wrap = false // We don't want wrapping in one-line prompts
+	gui.Views.Prompt.Editable = true
+	gui.Views.Prompt.Editor = gocui.EditorFunc(gui.promptEditor)
 
 	gui.Views.Suggestions.Visible = false
 
 	gui.Views.Menu.Visible = false
 
+	gui.Views.MenuFilterFrame.Visible = false
+	gui.Views.MenuFilter.Visible = false
+	gui.Views.MenuFilter.Frame = false
+	gui.Views.MenuFilter.Editable = true
+	gui.Views.MenuFilter.Editor = gocui.EditorFunc(gui.menuFilterEditor)
+	// The filter row belongs to the menu: it shares the menu's focus, and keys
+	// that the input field doesn't take are the menu's to handle.
+	gui.Views.MenuFilterFrame.ParentView = gui.Views.Menu
+	gui.Views.MenuFilter.ParentView = gui.Views.Menu
+
 	gui.Views.Tooltip.Visible = false
+	gui.Views.Tooltip.AutoRenderHyperLinks = true
 
 	gui.Views.Information.BgColor = gocui.ColorDefault
 	gui.Views.Information.FgColor = gocui.ColorGreen
 	gui.Views.Information.Frame = false
 
-	gui.Views.Extras.Title = gui.c.Tr.CommandLog
 	gui.Views.Extras.Autoscroll = true
 	gui.Views.Extras.Wrap = true
+	gui.Views.Extras.AutoRenderHyperLinks = true
 
-	gui.Views.Snake.Title = gui.c.Tr.SnakeTitle
 	gui.Views.Snake.FgColor = gocui.ColorGreen
 
 	return nil
 }
 
+// gocui expects a view's frame runes in this order: the horizontal and the
+// vertical edge, then the top left, top right, bottom left and bottom right
+// corner.
+func frameRunesWithTopCorners(frameRunes []rune, topLeft rune, topRight rune) []rune {
+	return []rune{frameRunes[0], frameRunes[1], topLeft, topRight, frameRunes[4], frameRunes[5]}
+}
+
 func (gui *Gui) configureViewProperties() {
 	frameRunes := []rune{'─', '│', '┌', '┐', '└', '┘'}
+	// The corners for a view that hangs off the bottom of another one, so that the
+	// border they share reads as a divider rather than as two frames touching.
+	teeLeft, teeRight := '├', '┤'
 	switch gui.c.UserConfig().Gui.Border {
 	case "double":
 		frameRunes = []rune{'═', '║', '╔', '╗', '╚', '╝'}
+		teeLeft, teeRight = '╠', '╣'
 	case "rounded":
 		frameRunes = []rune{'─', '│', '╭', '╮', '╰', '╯'}
 	case "hidden":
 		frameRunes = []rune{' ', ' ', ' ', ' ', ' ', ' '}
+		teeLeft, teeRight = ' ', ' '
+	case "bold":
+		frameRunes = []rune{'━', '┃', '┏', '┓', '┗', '┛'}
+		teeLeft, teeRight = '┣', '┫'
 	}
 
 	for _, mapping := range gui.orderedViewNameMappings() {
@@ -198,48 +206,100 @@ func (gui *Gui) configureViewProperties() {
 		(*mapping.viewPtr).InactiveViewSelBgColor = theme.GocuiInactiveViewSelectedLineBgColor
 	}
 
+	gui.Views.MenuFilterFrame.FrameRunes = frameRunesWithTopCorners(frameRunes, teeLeft, teeRight)
+
+	gui.c.SetViewContent(gui.Views.SearchPrefix, gui.c.Tr.SearchPrefix)
+
+	gui.Views.Stash.Title = gui.c.Tr.StashTitle
+	gui.Views.Commits.Title = gui.c.Tr.CommitsTitle
+	gui.Views.ReflogCommits.Title = gui.c.Tr.ReflogCommitsTitle
+	gui.Views.CommitFiles.Title = gui.c.Tr.CommitFiles
+	gui.Views.Branches.Title = gui.c.Tr.BranchesTitle
+	gui.Views.Remotes.Title = gui.c.Tr.RemotesTitle
+	gui.Views.Worktrees.Title = gui.c.Tr.WorktreesTitle
+	gui.Views.Submodules.Title = gui.c.Tr.SubmodulesTitle
+	gui.Views.Tags.Title = gui.c.Tr.TagsTitle
+	gui.Views.Files.Title = gui.c.Tr.FilesTitle
+	gui.Views.PatchBuilding.Title = gui.c.Tr.Patch
+	gui.Views.PatchBuildingSecondary.Title = gui.c.Tr.CustomPatch
+	gui.Views.MergeConflicts.Title = gui.c.Tr.MergeConflictsTitle
+	gui.Views.Limit.Title = gui.c.Tr.NotEnoughSpace
+	gui.Views.Status.Title = gui.c.Tr.StatusTitle
+	gui.Views.Staging.Title = gui.c.Tr.UnstagedChanges
+	gui.Views.StagingSecondary.Title = gui.c.Tr.StagedChanges
+	gui.Views.CommitMessage.Title = gui.c.Tr.CommitSummary
+	gui.Views.CommitDescription.Title = gui.c.Tr.CommitDescriptionTitle
+	gui.Views.Extras.Title = gui.c.Tr.CommandLog
+	gui.Views.Snake.Title = gui.c.Tr.SnakeTitle
+
 	for _, view := range []*gocui.View{gui.Views.Main, gui.Views.Secondary, gui.Views.Staging, gui.Views.StagingSecondary, gui.Views.PatchBuilding, gui.Views.PatchBuildingSecondary, gui.Views.MergeConflicts} {
+		view.Title = gui.c.Tr.DiffTitle
 		view.CanScrollPastBottom = gui.c.UserConfig().Gui.ScrollPastBottom
+		view.TabWidth = gui.c.UserConfig().Gui.TabWidth
 	}
 
 	gui.Views.CommitDescription.FgColor = theme.GocuiDefaultTextColor
 	gui.Views.CommitDescription.TextArea.AutoWrap = gui.c.UserConfig().Git.Commit.AutoWrapCommitMessage
 	gui.Views.CommitDescription.TextArea.AutoWrapWidth = gui.c.UserConfig().Git.Commit.AutoWrapWidth
 
-	if gui.c.UserConfig().Gui.ShowPanelJumps {
-		jumpBindings := gui.c.UserConfig().Keybinding.Universal.JumpToBlock
-		jumpLabels := lo.Map(jumpBindings, func(binding string, _ int) string {
-			return fmt.Sprintf("[%s]", binding)
+	keyToTitlePrefix := func(binding config.Keybinding) string {
+		if len(binding) == 0 {
+			return ""
+		}
+		return fmt.Sprintf("[%s]", binding[0])
+	}
+
+	// The views that make up each side panel, in panel order. The whole group
+	// shares the panel's jump label.
+	panelViewGroups := lo.Map(gui.c.UserConfig().Gui.SidePanels, func(panel config.SidePanel, _ int) []*gocui.View {
+		return lo.Map(panel, func(name string, _ int) *gocui.View {
+			view, _ := gui.g.View(sidePanelViewNames[name])
+			return view
 		})
+	})
 
-		gui.Views.Status.TitlePrefix = jumpLabels[0]
+	jumpBindings := gui.c.UserConfig().Keybinding.Universal.JumpToBlock
+	jumpLabelForPanel := func(panelIndex int) string {
+		if !gui.c.UserConfig().Gui.ShowPanelJumps || panelIndex >= len(jumpBindings) {
+			return ""
+		}
+		return keyToTitlePrefix(jumpBindings[panelIndex])
+	}
 
-		gui.Views.Files.TitlePrefix = jumpLabels[1]
-		gui.Views.Worktrees.TitlePrefix = jumpLabels[1]
-		gui.Views.Submodules.TitlePrefix = jumpLabels[1]
+	for panelIndex, views := range panelViewGroups {
+		prefix := jumpLabelForPanel(panelIndex)
+		for _, view := range views {
+			view.TitlePrefix = prefix
+		}
+	}
 
-		gui.Views.Branches.TitlePrefix = jumpLabels[2]
-		gui.Views.Remotes.TitlePrefix = jumpLabels[2]
-		gui.Views.Tags.TitlePrefix = jumpLabels[2]
-
-		gui.Views.Commits.TitlePrefix = jumpLabels[3]
-		gui.Views.ReflogCommits.TitlePrefix = jumpLabels[3]
-
-		gui.Views.Stash.TitlePrefix = jumpLabels[4]
+	if gui.c.UserConfig().Gui.ShowPanelJumps {
+		gui.Views.Main.TitlePrefix = keyToTitlePrefix(gui.c.UserConfig().Keybinding.Universal.FocusMainView)
 	} else {
-		gui.Views.Status.TitlePrefix = ""
+		gui.Views.Main.TitlePrefix = ""
+	}
 
-		gui.Views.Files.TitlePrefix = ""
-		gui.Views.Worktrees.TitlePrefix = ""
-		gui.Views.Submodules.TitlePrefix = ""
+	// Index the tab strips by view so we can both set them on views that are
+	// part of a multi-tab panel and clear them on views that no longer are
+	// (which matters when the config is reloaded and a tab becomes a standalone
+	// panel).
+	type viewTabs struct {
+		tabs  []string
+		index int
+	}
+	tabsByView := map[string]viewTabs{}
+	for _, values := range gui.viewTabMap() {
+		labels := lo.Map(values, func(tabContext context.TabView, _ int) string {
+			return tabContext.Tab
+		})
+		for index, tabContext := range values {
+			tabsByView[tabContext.ViewName] = viewTabs{tabs: labels, index: index}
+		}
+	}
 
-		gui.Views.Branches.TitlePrefix = ""
-		gui.Views.Remotes.TitlePrefix = ""
-		gui.Views.Tags.TitlePrefix = ""
-
-		gui.Views.Commits.TitlePrefix = ""
-		gui.Views.ReflogCommits.TitlePrefix = ""
-
-		gui.Views.Stash.TitlePrefix = ""
+	for _, view := range gui.g.Views() {
+		vt := tabsByView[view.Name()]
+		view.Tabs = vt.tabs
+		view.TabIndex = vt.index
 	}
 }

@@ -21,20 +21,45 @@ type ListContextTrait struct {
 	// If this is true, we only render the visible lines of the list. Useful for lists that can
 	// get very long, because it can save a lot of memory
 	renderOnlyVisibleLines bool
+	// If renderOnlyVisibleLines is true, needRerenderVisibleLines indicates whether we need to
+	// rerender the visible lines e.g. because the scroll position changed
+	needRerenderVisibleLines bool
+
+	// true if we're inside the OnSearchSelect call; in that case we don't want to update the search
+	// result index.
+	inOnSearchSelect bool
+
+	// If set, this renders the "x of y" footer instead of the default, which puts
+	// it on the bottom border of the list's own view. A list that is part of a
+	// composite panel can use this to put it somewhere else; see MenuContext.
+	renderFooter func(footer string)
 }
 
 func (self *ListContextTrait) IsListContext() {}
 
-func (self *ListContextTrait) FocusLine() {
+func (self *ListContextTrait) HasSelectableContent() bool {
+	return self.list.Len() > 0
+}
+
+func (self *ListContextTrait) FocusLine(scrollIntoView bool) {
+	self.Context.FocusLine(scrollIntoView)
+
+	// Need to capture this in a local variable because by the time the AfterLayout function runs,
+	// the field will have been reset to false already
+	inOnSearchSelect := self.inOnSearchSelect
+
 	// Doing this at the end of the layout function because we need the view to be
 	// resized before we focus the line, otherwise if we're in accordion mode
-	// the view could be squashed and won't how to adjust the cursor/origin.
+	// the view could be squashed and won't know how to adjust the cursor/origin.
 	// Also, refreshing the viewport needs to happen after the view has been resized.
 	self.c.AfterLayout(func() error {
 		oldOrigin, _ := self.GetViewTrait().ViewPortYBounds()
 
 		self.GetViewTrait().FocusPoint(
-			self.ModelIndexToViewIndex(self.list.GetSelectedLineIdx()))
+			self.ModelIndexToViewIndex(self.list.GetSelectedLineIdx()), scrollIntoView)
+		if !inOnSearchSelect {
+			self.GetView().SetNearestSearchPosition()
+		}
 
 		selectRangeIndex, isSelectingRange := self.list.GetRangeStartIdx()
 		if isSelectingRange {
@@ -48,8 +73,8 @@ func (self *ListContextTrait) FocusLine() {
 			self.refreshViewport()
 		} else if self.renderOnlyVisibleLines {
 			newOrigin, _ := self.GetViewTrait().ViewPortYBounds()
-			if oldOrigin != newOrigin {
-				return self.HandleRender()
+			if oldOrigin != newOrigin || self.needRerenderVisibleLines {
+				self.refreshViewport()
 			}
 		}
 		return nil
@@ -65,33 +90,37 @@ func (self *ListContextTrait) refreshViewport() {
 }
 
 func (self *ListContextTrait) setFooter() {
-	self.GetViewTrait().SetFooter(formatListFooter(self.list.GetSelectedLineIdx(), self.list.Len()))
+	footer := formatListFooter(self.list.GetSelectedLineIdx(), self.list.Len())
+	if self.renderFooter != nil {
+		self.renderFooter(footer)
+		return
+	}
+
+	self.GetViewTrait().SetFooter(footer)
 }
 
 func formatListFooter(selectedLineIdx int, length int) string {
 	return fmt.Sprintf("%d of %d", selectedLineIdx+1, length)
 }
 
-func (self *ListContextTrait) HandleFocus(opts types.OnFocusOpts) error {
-	self.FocusLine()
+func (self *ListContextTrait) HandleFocus(opts types.OnFocusOpts) {
+	self.FocusLine(!opts.KeepScrollPosition)
 
-	self.GetViewTrait().SetHighlight(self.list.Len() > 0)
-
-	return self.Context.HandleFocus(opts)
+	self.Context.HandleFocus(opts)
 }
 
-func (self *ListContextTrait) HandleFocusLost(opts types.OnFocusLostOpts) error {
+func (self *ListContextTrait) HandleFocusLost(opts types.OnFocusLostOpts) {
 	self.GetViewTrait().SetOriginX(0)
 
 	if self.refreshViewportOnChange {
 		self.refreshViewport()
 	}
 
-	return self.Context.HandleFocusLost(opts)
+	self.Context.HandleFocusLost(opts)
 }
 
 // OnFocus assumes that the content of the context has already been rendered to the view. OnRender is the function which actually renders the content to the view
-func (self *ListContextTrait) HandleRender() error {
+func (self *ListContextTrait) HandleRender() {
 	self.list.ClampSelection()
 	if self.renderOnlyVisibleLines {
 		// Rendering only the visible area can save a lot of cell memory for
@@ -100,23 +129,22 @@ func (self *ListContextTrait) HandleRender() error {
 		if self.getNonModelItems != nil {
 			totalLength += len(self.getNonModelItems())
 		}
-		self.GetViewTrait().SetContentLineCount(totalLength)
 		startIdx, length := self.GetViewTrait().ViewPortYBounds()
 		content := self.renderLines(startIdx, startIdx+length)
-		self.GetViewTrait().SetViewPortContentAndClearEverythingElse(content)
+		self.GetViewTrait().SetViewPortContentAndClearEverythingElse(totalLength, content)
+		self.needRerenderVisibleLines = false
 	} else {
 		content := self.renderLines(-1, -1)
 		self.GetViewTrait().SetContent(content)
 	}
-	self.c.Render()
 	self.setFooter()
-
-	return nil
 }
 
-func (self *ListContextTrait) OnSearchSelect(selectedLineIdx int) error {
+func (self *ListContextTrait) OnSearchSelect(selectedLineIdx int) {
 	self.GetList().SetSelection(self.ViewIndexToModelIndex(selectedLineIdx))
-	return self.HandleFocus(types.OnFocusOpts{})
+	self.inOnSearchSelect = true
+	self.HandleFocus(types.OnFocusOpts{})
+	self.inOnSearchSelect = false
 }
 
 func (self *ListContextTrait) IsItemVisible(item types.HasUrn) bool {
@@ -132,7 +160,7 @@ func (self *ListContextTrait) IsItemVisible(item types.HasUrn) bool {
 	return false
 }
 
-// By default, list contexts supporta range select
+// By default, list contexts supports range select
 func (self *ListContextTrait) RangeSelectEnabled() bool {
 	return true
 }
@@ -141,10 +169,18 @@ func (self *ListContextTrait) RenderOnlyVisibleLines() bool {
 	return self.renderOnlyVisibleLines
 }
 
+func (self *ListContextTrait) SetNeedRerenderVisibleLines() {
+	self.needRerenderVisibleLines = true
+}
+
 func (self *ListContextTrait) TotalContentHeight() int {
 	result := self.list.Len()
 	if self.getNonModelItems != nil {
 		result += len(self.getNonModelItems())
 	}
 	return result
+}
+
+func (self *ListContextTrait) IndexForGotoBottom() int {
+	return self.list.Len() - 1
 }

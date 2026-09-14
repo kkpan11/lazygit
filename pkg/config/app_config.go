@@ -1,14 +1,19 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/adrg/xdg"
+	"github.com/jesseduffield/generics/orderedset"
+	"github.com/jesseduffield/lazygit/pkg/utils"
 	"github.com/jesseduffield/lazygit/pkg/utils/yaml_utils"
 	"github.com/samber/lo"
 	"gopkg.in/yaml.v3"
@@ -16,17 +21,18 @@ import (
 
 // AppConfig contains the base configuration fields required for lazygit.
 type AppConfig struct {
-	debug                 bool   `long:"debug" env:"DEBUG" default:"false"`
-	version               string `long:"version" env:"VERSION" default:"unversioned"`
-	buildDate             string `long:"build-date" env:"BUILD_DATE"`
-	name                  string `long:"name" env:"NAME" default:"lazygit"`
-	buildSource           string `long:"build-source" env:"BUILD_SOURCE" default:""`
-	userConfig            *UserConfig
-	globalUserConfigFiles []*ConfigFile
-	userConfigFiles       []*ConfigFile
-	userConfigDir         string
-	tempDir               string
-	appState              *AppState
+	debug                  bool   `long:"debug" env:"DEBUG" default:"false"`
+	version                string `long:"version" env:"VERSION" default:"unversioned"`
+	buildDate              string `long:"build-date" env:"BUILD_DATE"`
+	name                   string `long:"name" env:"NAME" default:"lazygit"`
+	buildSource            string `long:"build-source" env:"BUILD_SOURCE" default:""`
+	userConfig             *UserConfig
+	globalUserConfigFiles  []*ConfigFile
+	userConfigFiles        []*ConfigFile
+	userConfigDir          string
+	tempDir                string
+	appState               *AppState
+	githubPullRequestCache *githubPullRequestCache
 }
 
 type AppConfigurer interface {
@@ -46,6 +52,8 @@ type AppConfigurer interface {
 
 	GetAppState() *AppState
 	SaveAppState() error
+	GetCachedGithubPullRequests(repoPath string) ([]CachedPullRequest, error)
+	SaveCachedGithubPullRequests(repoPath string, pullRequests []CachedPullRequest) error
 }
 
 type ConfigFilePolicy int
@@ -93,7 +101,7 @@ func NewAppConfig(
 		configFiles = []*ConfigFile{configFile}
 	}
 
-	userConfig, err := loadUserConfigWithDefaults(configFiles)
+	userConfig, err := loadUserConfigWithDefaults(configFiles, false)
 	if err != nil {
 		return nil, err
 	}
@@ -102,37 +110,28 @@ func NewAppConfig(
 	if err != nil {
 		return nil, err
 	}
-
-	// Temporary: the defaults for these are set to empty strings in
-	// getDefaultAppState so that we can migrate them from userConfig (which is
-	// now deprecated). Once we remove the user configs, we can remove this code
-	// and set the proper defaults in getDefaultAppState.
-	if appState.GitLogOrder == "" {
-		appState.GitLogOrder = userConfig.Git.Log.Order
-	}
-	if appState.GitLogShowGraph == "" {
-		appState.GitLogShowGraph = userConfig.Git.Log.ShowGraph
-	}
+	githubPullRequestCache := loadGithubPullRequestCache()
 
 	appConfig := &AppConfig{
-		name:                  name,
-		version:               version,
-		buildDate:             date,
-		debug:                 debuggingFlag,
-		buildSource:           buildSource,
-		userConfig:            userConfig,
-		globalUserConfigFiles: configFiles,
-		userConfigFiles:       configFiles,
-		userConfigDir:         configDir,
-		tempDir:               tempDir,
-		appState:              appState,
+		name:                   name,
+		version:                version,
+		buildDate:              date,
+		debug:                  debuggingFlag,
+		buildSource:            buildSource,
+		userConfig:             userConfig,
+		globalUserConfigFiles:  configFiles,
+		userConfigFiles:        configFiles,
+		userConfigDir:          configDir,
+		tempDir:                tempDir,
+		appState:               appState,
+		githubPullRequestCache: githubPullRequestCache,
 	}
 
 	return appConfig, nil
 }
 
 func ConfigDir() string {
-	_, filePath := findConfigFile("config.yml")
+	_, filePath := findConfigFile(ConfigFilename)
 
 	return filepath.Dir(filePath)
 }
@@ -142,11 +141,26 @@ func findOrCreateConfigDir() (string, error) {
 	return folder, os.MkdirAll(folder, 0o755)
 }
 
-func loadUserConfigWithDefaults(configFiles []*ConfigFile) (*UserConfig, error) {
-	return loadUserConfig(configFiles, GetDefaultConfig())
+// KeybindingPlatform returns the platform whose default keybindings should be
+// used. Normally this is the OS we're running on, but it can be overridden with
+// the LAZYGIT_KEYBINDING_PLATFORM environment variable; this is useful e.g. when
+// running lazygit in a Linux container that you access over ssh from a Mac, and
+// you'd rather use the Mac keybindings. An unrecognized value falls back to the
+// real OS, which gives meaningful bindings, rather than to the (arbitrary)
+// non-darwin defaults.
+func KeybindingPlatform() string {
+	platform := os.Getenv("LAZYGIT_KEYBINDING_PLATFORM")
+	if lo.Contains([]string{"darwin", "linux", "windows"}, platform) {
+		return platform
+	}
+	return runtime.GOOS
 }
 
-func loadUserConfig(configFiles []*ConfigFile, base *UserConfig) (*UserConfig, error) {
+func loadUserConfigWithDefaults(configFiles []*ConfigFile, isGuiInitialized bool) (*UserConfig, error) {
+	return loadUserConfig(configFiles, GetDefaultConfigForPlatform(KeybindingPlatform()), isGuiInitialized)
+}
+
+func loadUserConfig(configFiles []*ConfigFile, base *UserConfig, isGuiInitialized bool) (*UserConfig, error) {
 	for _, configFile := range configFiles {
 		path := configFile.Path
 		statInfo, err := os.Stat(path)
@@ -191,7 +205,7 @@ func loadUserConfig(configFiles []*ConfigFile, base *UserConfig) (*UserConfig, e
 			return nil, err
 		}
 
-		content, err = migrateUserConfig(path, content)
+		content, err = migrateUserConfig(path, content, isGuiInitialized)
 		if err != nil {
 			return nil, err
 		}
@@ -209,53 +223,424 @@ func loadUserConfig(configFiles []*ConfigFile, base *UserConfig) (*UserConfig, e
 		}
 	}
 
+	base.Keybinding.MergeLegacyAltKeybindings()
 	return base, nil
+}
+
+type ChangesSet = orderedset.OrderedSet[string]
+
+func NewChangesSet() *ChangesSet {
+	return orderedset.New[string]()
 }
 
 // Do any backward-compatibility migrations of things that have changed in the
 // config over time; examples are renaming a key to a better name, moving a key
 // from one container to another, or changing the type of a key (e.g. from bool
 // to an enum).
-func migrateUserConfig(path string, content []byte) ([]byte, error) {
-	changedContent, err := yaml_utils.RenameYamlKey(content, []string{"gui", "skipUnstageLineWarning"},
-		"skipDiscardChangeWarning")
+func migrateUserConfig(path string, content []byte, isGuiInitialized bool) ([]byte, error) {
+	changes := NewChangesSet()
+
+	changedContent, didChange, err := computeMigratedConfig(path, content, changes)
 	if err != nil {
-		return nil, fmt.Errorf("Couldn't migrate config file at `%s`: %s", path, err)
+		return nil, err
 	}
 
-	changedContent, err = yaml_utils.RenameYamlKey(changedContent, []string{"keybinding", "universal", "executeCustomCommand"},
-		"executeShellCommand")
-	if err != nil {
-		return nil, fmt.Errorf("Couldn't migrate config file at `%s`: %s", path, err)
+	// Nothing to do if config didn't change
+	if !didChange {
+		return content, nil
 	}
 
-	changedContent, err = changeNullKeybindingsToDisabled(changedContent)
+	changesText := "The following changes were made:\n\n"
+	changesText += strings.Join(lo.Map(changes.ToSliceFromOldest(), func(change string, _ int) string {
+		return fmt.Sprintf("- %s\n", change)
+	}), "")
+
+	// Write config back
+	if !isGuiInitialized {
+		fmt.Printf("The user config file %s must be migrated. Attempting to do this automatically.\n", path)
+		fmt.Println(changesText)
+	}
+	if err := os.WriteFile(path, changedContent, 0o644); err != nil {
+		errorMsg := fmt.Sprintf("While attempting to write back migrated user config to %s, an error occurred: %s", path, err)
+		if isGuiInitialized {
+			errorMsg += "\n\n" + changesText
+		}
+		return nil, errors.New(errorMsg)
+	}
+	if !isGuiInitialized {
+		fmt.Printf("Config file saved successfully to %s\n", path)
+	}
+	return changedContent, nil
+}
+
+// A pure function helper for testing purposes
+func computeMigratedConfig(path string, content []byte, changes *ChangesSet) ([]byte, bool, error) {
+	var err error
+	var rootNode yaml.Node
+	err = yaml.Unmarshal(content, &rootNode)
 	if err != nil {
-		return nil, fmt.Errorf("Couldn't migrate config file at `%s`: %s", path, err)
+		return nil, false, fmt.Errorf("failed to parse YAML: %w", err)
+	}
+	var originalCopy yaml.Node
+	err = yaml.Unmarshal(content, &originalCopy)
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to parse YAML, but only the second time!?!? How did that happen: %w", err)
+	}
+
+	pathsToReplace := []struct {
+		oldPath []string
+		newName string
+	}{
+		{[]string{"gui", "skipUnstageLineWarning"}, "skipDiscardChangeWarning"},
+		{[]string{"keybinding", "universal", "executeCustomCommand"}, "executeShellCommand"},
+		{[]string{"keybinding", "universal", "cyclePagers"}, "cycleDiffRenderers"},
+		{[]string{"keybinding", "universal", "cyclePagersReverse"}, "cycleDiffRenderersReverse"},
+		{[]string{"gui", "windowSize"}, "screenMode"},
+		{[]string{"keybinding", "files", "openMergeTool"}, "openMergeOptions"},
+	}
+
+	for _, pathToReplace := range pathsToReplace {
+		err, didReplace := yaml_utils.RenameYamlKey(&rootNode, pathToReplace.oldPath, pathToReplace.newName)
+		if err != nil {
+			return nil, false, fmt.Errorf("Couldn't migrate config file at `%s` for key %s: %w", path, strings.Join(pathToReplace.oldPath, "."), err)
+		}
+		if didReplace {
+			changes.Add(fmt.Sprintf("Renamed '%s' to '%s'", strings.Join(pathToReplace.oldPath, "."), pathToReplace.newName))
+		}
+	}
+
+	pathsToMove := []struct {
+		oldPath []string
+		newPath []string
+	}{
+		{
+			[]string{"keybinding", "worktrees", "viewWorktreeOptions"},
+			[]string{"keybinding", "universal", "newWorktree"},
+		},
+	}
+
+	for _, pathToMove := range pathsToMove {
+		err, didMove := yaml_utils.MoveYamlKey(&rootNode, pathToMove.oldPath, pathToMove.newPath)
+		if err != nil {
+			return nil, false, fmt.Errorf("Couldn't migrate config file at `%s` for key %s: %w", path, strings.Join(pathToMove.oldPath, "."), err)
+		}
+		if didMove {
+			changes.Add(fmt.Sprintf("Moved '%s' to '%s'", strings.Join(pathToMove.oldPath, "."), strings.Join(pathToMove.newPath, ".")))
+		}
+	}
+
+	err = changeNullKeybindingsToDisabled(&rootNode, changes)
+	if err != nil {
+		return nil, false, fmt.Errorf("Couldn't migrate config file at `%s`: %w", path, err)
+	}
+
+	err = changeElementToSequence(&rootNode, []string{"git", "commitPrefix"}, changes)
+	if err != nil {
+		return nil, false, fmt.Errorf("Couldn't migrate config file at `%s`: %w", path, err)
+	}
+
+	err = changeCommitPrefixesMap(&rootNode, changes)
+	if err != nil {
+		return nil, false, fmt.Errorf("Couldn't migrate config file at `%s`: %w", path, err)
+	}
+
+	err = changeCustomCommandStreamAndOutputToOutputEnum(&rootNode, changes)
+	if err != nil {
+		return nil, false, fmt.Errorf("Couldn't migrate config file at `%s`: %w", path, err)
+	}
+
+	err = migrateAllBranchesLogCmd(&rootNode, changes)
+	if err != nil {
+		return nil, false, fmt.Errorf("Couldn't migrate config file at `%s`: %w", path, err)
+	}
+
+	err = migratePaging(&rootNode, changes)
+	if err != nil {
+		return nil, false, fmt.Errorf("Couldn't migrate config file at `%s`: %w", path, err)
+	}
+
+	err = migratePagersToDiffRenderers(&rootNode, changes)
+	if err != nil {
+		return nil, false, fmt.Errorf("Couldn't migrate config file at `%s`: %w", path, err)
 	}
 
 	// Add more migrations here...
 
-	// Write config back if changed
-	if string(changedContent) != string(content) {
-		if err := os.WriteFile(path, changedContent, 0o644); err != nil {
-			return nil, fmt.Errorf("Couldn't write migrated config back to `%s`: %s", path, err)
-		}
-		return changedContent, nil
+	if reflect.DeepEqual(rootNode, originalCopy) {
+		return nil, false, nil
 	}
 
-	return content, nil
+	newContent, err := yaml_utils.YamlMarshal(&rootNode)
+	if err != nil {
+		return nil, false, fmt.Errorf("Failed to remarsal!\n %w", err)
+	}
+	return newContent, true, nil
 }
 
-func changeNullKeybindingsToDisabled(changedContent []byte) ([]byte, error) {
-	return yaml_utils.Walk(changedContent, func(node *yaml.Node, path string) bool {
+func changeNullKeybindingsToDisabled(rootNode *yaml.Node, changes *ChangesSet) error {
+	return yaml_utils.Walk(rootNode, func(node *yaml.Node, path string) {
 		if strings.HasPrefix(path, "keybinding.") && node.Kind == yaml.ScalarNode && node.Tag == "!!null" {
 			node.Value = "<disabled>"
 			node.Tag = "!!str"
-			return true
+			changes.Add(fmt.Sprintf("Changed 'null' to '<disabled>' for keybinding '%s'", path))
 		}
-		return false
 	})
+}
+
+func changeElementToSequence(rootNode *yaml.Node, path []string, changes *ChangesSet) error {
+	return yaml_utils.TransformNode(rootNode, path, func(node *yaml.Node) error {
+		if node.Kind == yaml.MappingNode {
+			nodeContentCopy := node.Content
+			node.Kind = yaml.SequenceNode
+			node.Value = ""
+			node.Tag = "!!seq"
+			node.Content = []*yaml.Node{{
+				Kind:    yaml.MappingNode,
+				Content: nodeContentCopy,
+			}}
+
+			changes.Add(fmt.Sprintf("Changed '%s' to an array of strings", strings.Join(path, ".")))
+
+			return nil
+		}
+		return nil
+	})
+}
+
+func changeCommitPrefixesMap(rootNode *yaml.Node, changes *ChangesSet) error {
+	return yaml_utils.TransformNode(rootNode, []string{"git", "commitPrefixes"}, func(prefixesNode *yaml.Node) error {
+		if prefixesNode.Kind == yaml.MappingNode {
+			for _, contentNode := range prefixesNode.Content {
+				if contentNode.Kind == yaml.MappingNode {
+					nodeContentCopy := contentNode.Content
+					contentNode.Kind = yaml.SequenceNode
+					contentNode.Value = ""
+					contentNode.Tag = "!!seq"
+					contentNode.Content = []*yaml.Node{{
+						Kind:    yaml.MappingNode,
+						Content: nodeContentCopy,
+					}}
+					changes.Add("Changed 'git.commitPrefixes' elements to arrays of strings")
+				}
+			}
+		}
+		return nil
+	})
+}
+
+func changeCustomCommandStreamAndOutputToOutputEnum(rootNode *yaml.Node, changes *ChangesSet) error {
+	return yaml_utils.Walk(rootNode, func(node *yaml.Node, path string) {
+		// We are being lazy here and rely on the fact that the only mapping
+		// nodes in the tree under customCommands are actual custom commands. If
+		// this ever changes (e.g. because we add a struct field to
+		// customCommand), then we need to change this to iterate properly.
+		if strings.HasPrefix(path, "customCommands[") && node.Kind == yaml.MappingNode {
+			output := ""
+			if streamKey, streamValue := yaml_utils.RemoveKey(node, "subprocess"); streamKey != nil {
+				if streamValue.Kind == yaml.ScalarNode && streamValue.Value == "true" {
+					output = "terminal"
+					changes.Add("Changed 'subprocess: true' to 'output: terminal' in custom command")
+				} else {
+					changes.Add("Deleted redundant 'subprocess: false' in custom command")
+				}
+			}
+			if streamKey, streamValue := yaml_utils.RemoveKey(node, "stream"); streamKey != nil {
+				if streamValue.Kind == yaml.ScalarNode && streamValue.Value == "true" && output == "" {
+					output = "log"
+					changes.Add("Changed 'stream: true' to 'output: log' in custom command")
+				} else {
+					changes.Add(fmt.Sprintf("Deleted redundant 'stream: %v' property in custom command", streamValue.Value))
+				}
+			}
+			if streamKey, streamValue := yaml_utils.RemoveKey(node, "showOutput"); streamKey != nil {
+				if streamValue.Kind == yaml.ScalarNode && streamValue.Value == "true" && output == "" {
+					changes.Add("Changed 'showOutput: true' to 'output: popup' in custom command")
+					output = "popup"
+				} else {
+					changes.Add(fmt.Sprintf("Deleted redundant 'showOutput: %v' property in custom command", streamValue.Value))
+				}
+			}
+			if output != "" {
+				outputKeyNode := &yaml.Node{
+					Kind:  yaml.ScalarNode,
+					Value: "output",
+					Tag:   "!!str",
+				}
+				outputValueNode := &yaml.Node{
+					Kind:  yaml.ScalarNode,
+					Value: output,
+					Tag:   "!!str",
+				}
+				node.Content = append(node.Content, outputKeyNode, outputValueNode)
+			}
+		}
+	})
+}
+
+// This migration is special because users have already defined
+// a single element at `allBranchesLogCmd` and the sequence at `allBranchesLogCmds`.
+// Some users have explicitly set `allBranchesLogCmd` to be an empty string in order
+// to remove it, so in that case we just delete the element, and add nothing to the list
+func migrateAllBranchesLogCmd(rootNode *yaml.Node, changes *ChangesSet) error {
+	return yaml_utils.TransformNode(rootNode, []string{"git"}, func(gitNode *yaml.Node) error {
+		cmdKeyNode, cmdValueNode := yaml_utils.LookupKey(gitNode, "allBranchesLogCmd")
+		// Nothing to do if they do not have the deprecated item
+		if cmdKeyNode == nil {
+			return nil
+		}
+
+		cmdsKeyNode, cmdsValueNode := yaml_utils.LookupKey(gitNode, "allBranchesLogCmds")
+		var change string
+		if cmdsKeyNode == nil {
+			// Create empty sequence node and attach it onto the root git node
+			// We will later populate it with the individual allBranchesLogCmd record
+			cmdsKeyNode = &yaml.Node{Kind: yaml.ScalarNode, Value: "allBranchesLogCmds"}
+			cmdsValueNode = &yaml.Node{Kind: yaml.SequenceNode, Content: []*yaml.Node{}}
+			gitNode.Content = append(
+				gitNode.Content,
+				cmdsKeyNode,
+				cmdsValueNode,
+			)
+			change = "Created git.allBranchesLogCmds array containing value of git.allBranchesLogCmd"
+		} else {
+			if cmdsValueNode.Kind != yaml.SequenceNode {
+				return errors.New("You should have an allBranchesLogCmds defined as a sequence!")
+			}
+
+			change = "Prepended git.allBranchesLogCmd value to git.allBranchesLogCmds array"
+		}
+
+		if cmdValueNode.Value != "" {
+			// Prepending the individual element to make it show up first in the list, which was prior behavior
+			cmdsValueNode.Content = utils.Prepend(cmdsValueNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: cmdValueNode.Value})
+			changes.Add(change)
+		}
+
+		// Clear out the existing allBranchesLogCmd, now that we have migrated it into the list
+		_, _ = yaml_utils.RemoveKey(gitNode, "allBranchesLogCmd")
+		changes.Add("Removed obsolete git.allBranchesLogCmd")
+
+		return nil
+	})
+}
+
+// Migrate the single 'paging' node to an array of 'pagers'. This is not the final structure, we
+// migrate it to diffRenderers from there in a separate step below.
+func migratePaging(rootNode *yaml.Node, changes *ChangesSet) error {
+	return yaml_utils.TransformNode(rootNode, []string{"git"}, func(gitNode *yaml.Node) error {
+		pagingKeyNode, pagingValueNode := yaml_utils.LookupKey(gitNode, "paging")
+		if pagingKeyNode == nil || pagingValueNode.Kind != yaml.MappingNode {
+			// If there's no "paging" section (or it's not an object), there's nothing to do
+			return nil
+		}
+
+		pagersKeyNode, _ := yaml_utils.LookupKey(gitNode, "pagers")
+		diffRenderersKeyNode, _ := yaml_utils.LookupKey(gitNode, "diffRenderers")
+		if pagersKeyNode != nil || diffRenderersKeyNode != nil {
+			// Conversely, if there is already a newer array config, we also have nothing to do.
+			// This covers the case where the user keeps both formats for the sake of easier testing
+			// of old versions.
+			return nil
+		}
+
+		pagingKeyNode.Value = "pagers"
+		pagingContentCopy := pagingValueNode.Content
+		pagingValueNode.Kind = yaml.SequenceNode
+		pagingValueNode.Tag = "!!seq"
+		pagingValueNode.Style &^= yaml.FlowStyle
+		pagingValueNode.Content = []*yaml.Node{{
+			Kind:    yaml.MappingNode,
+			Content: pagingContentCopy,
+		}}
+
+		changes.Add("Moved git.paging object to git.pagers array")
+
+		return nil
+	})
+}
+
+func migratePagersToDiffRenderers(rootNode *yaml.Node, changes *ChangesSet) error {
+	return yaml_utils.TransformNode(rootNode, []string{"git"}, func(gitNode *yaml.Node) error {
+		pagersKeyNode, pagersValueNode := yaml_utils.LookupKey(gitNode, "pagers")
+		if pagersKeyNode == nil || pagersValueNode.Kind != yaml.SequenceNode {
+			// If there's no "pagers" section (or it's not a sequence), there's nothing to do
+			return nil
+		}
+
+		diffRenderersKeyNode, _ := yaml_utils.LookupKey(gitNode, "diffRenderers")
+		if diffRenderersKeyNode != nil {
+			// Conversely, if there *is* already a "diffRenderers" array, we also have nothing to do.
+			// This covers the case where the user keeps both the "pagers" and the "diffRenderers"
+			// arrays for the sake of easier testing of old versions.
+			return nil
+		}
+
+		pagersKeyNode.Value = "diffRenderers"
+		changes.Add("Renamed git.pagers to git.diffRenderers")
+
+		for _, diffRendererNode := range pagersValueNode.Content {
+			if diffRendererNode.Kind != yaml.MappingNode {
+				continue
+			}
+
+			pagerKeyNode, pagerValueNode := yaml_utils.LookupKey(diffRendererNode, "pager")
+			externalDiffCommandKeyNode, externalDiffCommandValueNode := yaml_utils.LookupKey(diffRendererNode, "externalDiffCommand")
+			useExternalDiffGitConfigKeyNode, useExternalDiffGitConfigValueNode := yaml_utils.LookupKey(diffRendererNode, "useExternalDiffGitConfig")
+
+			hasPager := hasNonNullScalarValue(pagerValueNode)
+			hasExternalDiffCommand := hasNonNullScalarValue(externalDiffCommandValueNode)
+			useExternalDiffGitConfig := yamlBoolValue(useExternalDiffGitConfigValueNode)
+
+			if hasPager {
+				pagerKeyNode.Value = "command"
+				changes.Add("Renamed 'pager' to 'command' in git pager")
+			} else if hasExternalDiffCommand {
+				externalDiffCommandKeyNode.Value = "command"
+				yaml_utils.AddStringKey(diffRendererNode, "type", "extDiff")
+				changes.Add("Changed 'externalDiffCommand' to 'command' with 'type: extDiff' in git pager")
+			} else if useExternalDiffGitConfig {
+				yaml_utils.RemoveKey(diffRendererNode, "useExternalDiffGitConfig")
+				yaml_utils.AddStringKey(diffRendererNode, "type", "extDiff")
+				changes.Add("Changed 'useExternalDiffGitConfig: true' to 'type: extDiff' in git pager")
+			} else {
+				yaml_utils.AddStringKey(diffRendererNode, "type", "rawGit")
+				diffRendererNode.Style &^= yaml.FlowStyle
+				changes.Add("Changed git pager without a command to 'type: rawGit'")
+			}
+
+			if pagerKeyNode != nil && !hasPager {
+				yaml_utils.RemoveKey(diffRendererNode, "pager")
+				changes.Add("Removed empty 'pager' from git pager")
+			}
+			if externalDiffCommandKeyNode != nil && !hasExternalDiffCommand {
+				yaml_utils.RemoveKey(diffRendererNode, "externalDiffCommand")
+				changes.Add("Removed empty 'externalDiffCommand' from git pager")
+			}
+			if useExternalDiffGitConfigKeyNode != nil && !useExternalDiffGitConfig {
+				yaml_utils.RemoveKey(diffRendererNode, "useExternalDiffGitConfig")
+				if useExternalDiffGitConfigValueNode.Tag == "!!null" {
+					changes.Add("Removed empty 'useExternalDiffGitConfig' from git pager")
+				} else {
+					changes.Add("Removed 'useExternalDiffGitConfig: false' from git pager")
+				}
+			}
+		}
+
+		return nil
+	})
+}
+
+func hasNonNullScalarValue(node *yaml.Node) bool {
+	return node != nil && node.Kind == yaml.ScalarNode && node.Tag != "!!null" && node.Value != ""
+}
+
+func yamlBoolValue(node *yaml.Node) bool {
+	if node == nil {
+		return false
+	}
+
+	var value bool
+	return node.Decode(&value) == nil && value
 }
 
 func (c *AppConfig) GetDebug() bool {
@@ -286,6 +671,20 @@ func (c *AppConfig) GetAppState() *AppState {
 	return c.appState
 }
 
+func (c *AppConfig) GetCachedGithubPullRequests(repoPath string) ([]CachedPullRequest, error) {
+	if c.githubPullRequestCache == nil {
+		return nil, nil
+	}
+	return c.githubPullRequestCache.get(repoPath), c.githubPullRequestCache.takeLoadError()
+}
+
+func (c *AppConfig) SaveCachedGithubPullRequests(repoPath string, pullRequests []CachedPullRequest) error {
+	if c.githubPullRequestCache == nil {
+		return nil
+	}
+	return c.githubPullRequestCache.save(repoPath, pullRequests)
+}
+
 func (c *AppConfig) GetUserConfigPaths() []string {
 	return lo.FilterMap(c.userConfigFiles, func(f *ConfigFile, _ int) (string, bool) {
 		return f.Path, f.exists
@@ -298,7 +697,7 @@ func (c *AppConfig) GetUserConfigDir() string {
 
 func (c *AppConfig) ReloadUserConfigForRepo(repoConfigFiles []*ConfigFile) error {
 	configFiles := append(c.globalUserConfigFiles, repoConfigFiles...)
-	userConfig, err := loadUserConfigWithDefaults(configFiles)
+	userConfig, err := loadUserConfigWithDefaults(configFiles, true)
 	if err != nil {
 		return err
 	}
@@ -323,7 +722,7 @@ func (c *AppConfig) ReloadChangedUserConfigFiles() (error, bool) {
 		return nil, false
 	}
 
-	userConfig, err := loadUserConfigWithDefaults(c.userConfigFiles)
+	userConfig, err := loadUserConfigWithDefaults(c.userConfigFiles, true)
 	if err != nil {
 		return err, false
 	}
@@ -446,45 +845,21 @@ func (c *AppConfig) SaveGlobalUserConfig() {
 // AppState stores data between runs of the app like when the last update check
 // was performed and which other repos have been checked out
 type AppState struct {
-	LastUpdateCheck     int64
-	RecentRepos         []string
-	StartupPopupVersion int
-	LastVersion         string // this is the last version the user was using, for the purpose of showing release notes
+	LastUpdateCheck        int64
+	RecentRepos            []string
+	StartupPopupVersion    int
+	DidShowHunkStagingHint bool
+	LastVersion            string // this is the last version the user was using, for the purpose of showing release notes
 
 	// these are for shell commands typed in directly, not for custom commands in the lazygit config.
 	// For backwards compatibility we keep the old name in yaml files.
 	ShellCommandsHistory []string `yaml:"customcommandshistory"`
 
-	HideCommandLog             bool
-	IgnoreWhitespaceInDiffView bool
-	DiffContextSize            int
-	RenameSimilarityThreshold  int
-	LocalBranchSortOrder       string
-	RemoteBranchSortOrder      string
-
-	// One of: 'date-order' | 'author-date-order' | 'topo-order' | 'default'
-	// 'topo-order' makes it easier to read the git log graph, but commits may not
-	// appear chronologically. See https://git-scm.com/docs/
-	GitLogOrder string
-
-	// This determines whether the git graph is rendered in the commits panel
-	// One of 'always' | 'never' | 'when-maximised'
-	GitLogShowGraph string
+	HideCommandLog bool
 }
 
 func getDefaultAppState() *AppState {
-	return &AppState{
-		LastUpdateCheck:           0,
-		RecentRepos:               []string{},
-		StartupPopupVersion:       0,
-		LastVersion:               "",
-		DiffContextSize:           3,
-		RenameSimilarityThreshold: 50,
-		LocalBranchSortOrder:      "recency",
-		RemoteBranchSortOrder:     "alphabetical",
-		GitLogOrder:               "", // should be "topo-order" eventually
-		GitLogShowGraph:           "", // should be "always" eventually
-	}
+	return &AppState{}
 }
 
 func LogPath() (string, error) {

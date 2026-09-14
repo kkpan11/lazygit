@@ -1,7 +1,8 @@
 package gui
 
 import (
-	"github.com/jesseduffield/gocui"
+	"github.com/jesseduffield/lazygit/pkg/gocui"
+	"github.com/jesseduffield/lazygit/pkg/gui/context"
 	"github.com/jesseduffield/lazygit/pkg/gui/types"
 )
 
@@ -20,10 +21,7 @@ func (gui *Gui) runTaskForView(view *gocui.View, task types.UpdateTask) error {
 		return gui.newCmdTask(view, v.Cmd, v.Prefix)
 
 	case *types.RunPtyTask:
-		gui.afterLayout(func() error {
-			return gui.newPtyTask(view, v.Cmd, v.Prefix)
-		})
-		return nil
+		return gui.newPtyTask(view, v.Cmd, v.Prefix)
 	}
 
 	return nil
@@ -58,7 +56,7 @@ func (gui *Gui) moveMainContextToTop(context types.Context) {
 	}
 }
 
-func (gui *Gui) RefreshMainView(opts *types.ViewUpdateOpts, context types.Context) error {
+func (gui *Gui) RefreshMainView(opts *types.ViewUpdateOpts, context types.Context) {
 	view := context.GetView()
 
 	if opts.Title != "" {
@@ -69,10 +67,7 @@ func (gui *Gui) RefreshMainView(opts *types.ViewUpdateOpts, context types.Contex
 
 	if err := gui.runTaskForView(view, opts.Task); err != nil {
 		gui.c.Log.Error(err)
-		return nil
 	}
-
-	return nil
 }
 
 func (gui *Gui) normalMainContextPair() types.MainContextPair {
@@ -112,38 +107,50 @@ func (gui *Gui) allMainContextPairs() []types.MainContextPair {
 	}
 }
 
-func (gui *Gui) refreshMainViews(opts types.RefreshMainOpts) error {
-	// need to reset scroll positions of all other main views
-	for _, pair := range gui.allMainContextPairs() {
-		if pair.Main != opts.Pair.Main {
-			_ = pair.Main.GetView().SetOrigin(0, 0)
-		}
-		if pair.Secondary != nil && pair.Secondary != opts.Pair.Secondary {
-			_ = pair.Secondary.GetView().SetOrigin(0, 0)
-		}
-	}
+func (gui *Gui) refreshMainViews(opts types.RefreshMainOpts) {
+	gui.moveMainContextPairToTop(opts.Pair)
 
 	if opts.Main != nil {
-		if err := gui.RefreshMainView(opts.Main, opts.Pair.Main); err != nil {
-			return err
-		}
+		gui.RefreshMainView(opts.Main, opts.Pair.Main)
 	}
 
 	if opts.Secondary != nil {
-		if err := gui.RefreshMainView(opts.Secondary, opts.Pair.Secondary); err != nil {
-			return err
-		}
+		gui.RefreshMainView(opts.Secondary, opts.Pair.Secondary)
 	} else if opts.Pair.Secondary != nil {
 		opts.Pair.Secondary.GetView().Clear()
 	}
 
-	gui.moveMainContextPairToTop(opts.Pair)
+	// Reset the scroll positions of all the other main views. We do this after
+	// moving this pair to the top (which copies the previously-shown view's
+	// content into the now-visible one to avoid a blank frame): resetting first
+	// would zero that source view's scroll before it gets copied, forcing the
+	// placeholder to the top instead of leaving it where the screen already was.
+	for _, pair := range gui.allMainContextPairs() {
+		if pair.Main != opts.Pair.Main {
+			pair.Main.GetView().SetOrigin(0, 0)
+		}
+		if pair.Secondary != nil && pair.Secondary != opts.Pair.Secondary {
+			pair.Secondary.GetView().SetOrigin(0, 0)
+		}
+	}
 
 	gui.splitMainPanel(opts.Secondary != nil)
-
-	return nil
 }
 
 func (gui *Gui) splitMainPanel(splitMainPanel bool) {
 	gui.State.SplitMainPanel = splitMainPanel
+}
+
+// reApplySearch runs a search the view holds again over the content a render has just
+// finished putting there, so that the matches highlighted and the "x of y" status
+// describe what the view shows now rather than what it showed when the search was
+// typed. Call it once the content is final.
+func (gui *Gui) reApplySearch(view *gocui.View) {
+	// While the prompt is open, the search view holds what the user is typing, and the
+	// status would be written over it.
+	if gui.State.ContextMgr.Current().GetKey() == context.SEARCH_CONTEXT_KEY {
+		return
+	}
+
+	view.RefreshSearch()
 }

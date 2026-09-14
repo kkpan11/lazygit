@@ -12,7 +12,7 @@ var Reset = NewIntegrationTest(NewIntegrationTestArgs{
 	SetupConfig: func(cfg *config.AppConfig) {
 		cfg.GetUserConfig().CustomCommands = []config.CustomCommand{
 			{
-				Key:     "e",
+				Key:     config.Keybinding{"e"},
 				Context: "files",
 				Command: "git commit --allow-empty -m \"empty commit\" && echo \"my_file content\" > my_file",
 			},
@@ -31,11 +31,7 @@ var Reset = NewIntegrationTest(NewIntegrationTestArgs{
 			t.Views().Status().Content(Contains("repo"))
 		}
 		assertInSubmodule := func() {
-			if t.Git().Version().IsAtLeast(2, 22, 0) {
-				t.Views().Status().Content(Contains("my_submodule_path(my_submodule_name)"))
-			} else {
-				t.Views().Status().Content(Contains("my_submodule_path"))
-			}
+			t.Views().Status().Content(Contains("my_submodule_path"))
 		}
 
 		assertInParentRepo()
@@ -50,7 +46,7 @@ var Reset = NewIntegrationTest(NewIntegrationTestArgs{
 		assertInSubmodule()
 
 		t.Views().Files().IsFocused().
-			Press("e").
+			Press(config.Keybinding{"e"}).
 			Tap(func() {
 				t.Views().Commits().Content(Contains("empty commit"))
 				t.Views().Files().Content(Contains("my_file"))
@@ -71,24 +67,27 @@ var Reset = NewIntegrationTest(NewIntegrationTestArgs{
 
 		t.Views().Files().Focus().
 			Lines(
-				MatchesRegexp(` M.*my_submodule_path \(submodule\)`),
-				Contains("other_file").IsSelected(),
+				Equals("▼ /"),
+				Equals("   M my_submodule_path (submodule)"),
+				Equals("  ?? other_file").IsSelected(),
 			).
-			// Verify we can't use range select on submodules
+			// Verify we can't reset a submodule and file change at the same time.
 			Press(keys.Universal.ToggleRangeSelect).
 			SelectPreviousItem().
 			Lines(
-				MatchesRegexp(` M.*my_submodule_path \(submodule\)`).IsSelected(),
-				Contains("other_file").IsSelected(),
+				Equals("▼ /"),
+				Equals("   M my_submodule_path (submodule)").IsSelected(),
+				Equals("  ?? other_file").IsSelected(),
 			).
 			Press(keys.Universal.Remove).
 			Tap(func() {
-				t.ExpectToast(Contains("Disabled: Range select not supported for submodules"))
+				t.ExpectToast(Contains("Disabled: Multiselection not supported for submodules"))
 			}).
 			Press(keys.Universal.ToggleRangeSelect).
 			Lines(
-				MatchesRegexp(` M.*my_submodule_path \(submodule\)`).IsSelected(),
-				Contains("other_file"),
+				Equals("▼ /"),
+				Equals("   M my_submodule_path (submodule)").IsSelected(),
+				Equals("  ?? other_file"),
 			).
 			Press(keys.Universal.Remove).
 			Tap(func() {
@@ -98,7 +97,7 @@ var Reset = NewIntegrationTest(NewIntegrationTestArgs{
 					Confirm()
 			}).
 			Lines(
-				Contains("other_file").IsSelected(),
+				Equals("?? other_file").IsSelected(),
 			)
 
 		t.Views().Submodules().Focus().
@@ -108,8 +107,8 @@ var Reset = NewIntegrationTest(NewIntegrationTestArgs{
 
 		// submodule has been hard reset to the commit the parent repo specifies
 		t.Views().Branches().Lines(
-			Contains("HEAD detached").IsSelected(),
-			Contains("master"),
+			Contains("HEAD detached"),
+			Contains("master").IsSelected(),
 		)
 
 		// empty commit is gone

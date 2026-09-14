@@ -1,21 +1,14 @@
 package controllers
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/jesseduffield/lazygit/pkg/gui/context"
 	"github.com/jesseduffield/lazygit/pkg/gui/types"
-	"github.com/samber/lo"
 )
 
 // This controller lets you change the similarity threshold for detecting renames.
-
-var CONTEXT_KEYS_SHOWING_RENAMES = []types.ContextKey{
-	context.FILES_CONTEXT_KEY,
-	context.SUB_COMMITS_CONTEXT_KEY,
-	context.LOCAL_COMMITS_CONTEXT_KEY,
-	context.STASH_CONTEXT_KEY,
-}
 
 type RenameSimilarityThresholdController struct {
 	baseController
@@ -36,13 +29,13 @@ func NewRenameSimilarityThresholdController(
 func (self *RenameSimilarityThresholdController) GetKeybindings(opts types.KeybindingsOpts) []*types.Binding {
 	bindings := []*types.Binding{
 		{
-			Key:         opts.GetKey(opts.Config.Universal.IncreaseRenameSimilarityThreshold),
+			Keys:        opts.GetKeys(opts.Config.Universal.IncreaseRenameSimilarityThreshold),
 			Handler:     self.Increase,
 			Description: self.c.Tr.IncreaseRenameSimilarityThreshold,
 			Tooltip:     self.c.Tr.IncreaseRenameSimilarityThresholdTooltip,
 		},
 		{
-			Key:         opts.GetKey(opts.Config.Universal.DecreaseRenameSimilarityThreshold),
+			Keys:        opts.GetKeys(opts.Config.Universal.DecreaseRenameSimilarityThreshold),
 			Handler:     self.Decrease,
 			Description: self.c.Tr.DecreaseRenameSimilarityThreshold,
 			Tooltip:     self.c.Tr.DecreaseRenameSimilarityThresholdTooltip,
@@ -57,44 +50,55 @@ func (self *RenameSimilarityThresholdController) Context() types.Context {
 }
 
 func (self *RenameSimilarityThresholdController) Increase() error {
-	old_size := self.c.AppState.RenameSimilarityThreshold
-
-	if self.isShowingRenames() && old_size < 100 {
-		self.c.AppState.RenameSimilarityThreshold = min(100, old_size+5)
-		return self.applyChange()
+	if err := self.checkCanChangeThreshold(); err != nil {
+		return err
 	}
 
-	return nil
+	old_size := self.c.UserConfig().Git.RenameSimilarityThreshold
+
+	if old_size < 100 {
+		self.c.UserConfig().Git.RenameSimilarityThreshold = min(100, old_size+5)
+	}
+
+	return self.applyChange()
 }
 
 func (self *RenameSimilarityThresholdController) Decrease() error {
-	old_size := self.c.AppState.RenameSimilarityThreshold
-
-	if self.isShowingRenames() && old_size > 5 {
-		self.c.AppState.RenameSimilarityThreshold = max(5, old_size-5)
-		return self.applyChange()
+	if err := self.checkCanChangeThreshold(); err != nil {
+		return err
 	}
 
-	return nil
+	old_size := self.c.UserConfig().Git.RenameSimilarityThreshold
+
+	if old_size > 5 {
+		self.c.UserConfig().Git.RenameSimilarityThreshold = max(5, old_size-5)
+	}
+
+	return self.applyChange()
 }
 
 func (self *RenameSimilarityThresholdController) applyChange() error {
-	self.c.Toast(fmt.Sprintf(self.c.Tr.RenameSimilarityThresholdChanged, self.c.AppState.RenameSimilarityThreshold))
-	self.c.SaveAppStateAndLogError()
+	self.c.Toast(fmt.Sprintf(self.c.Tr.RenameSimilarityThresholdChanged, self.c.UserConfig().Git.RenameSimilarityThreshold))
 
-	currentContext := self.c.Context().CurrentStatic()
+	currentContext := self.c.Context().CurrentSide()
 	switch currentContext.GetKey() {
-	// we make an exception for our files context, because it actually need to refresh its state afterwards.
+	// we make an exception for the files and commit-files contexts, because
+	// they actually need to refresh their state afterwards: a changed threshold
+	// can turn a rename into a separate delete and add, or vice versa.
 	case context.FILES_CONTEXT_KEY:
-		return self.c.Refresh(types.RefreshOptions{Scope: []types.RefreshableView{types.FILES}})
+		self.c.Refresh(types.RefreshOptions{Scope: []types.RefreshableView{types.FILES}})
+	case context.COMMIT_FILES_CONTEXT_KEY:
+		self.c.Refresh(types.RefreshOptions{Scope: []types.RefreshableView{types.COMMIT_FILES}})
 	default:
-		return currentContext.HandleRenderToMain()
+		currentContext.HandleRenderToMain()
 	}
+	return nil
 }
 
-func (self *RenameSimilarityThresholdController) isShowingRenames() bool {
-	return lo.Contains(
-		CONTEXT_KEYS_SHOWING_RENAMES,
-		self.c.Context().CurrentStatic().GetKey(),
-	)
+func (self *RenameSimilarityThresholdController) checkCanChangeThreshold() error {
+	if self.c.Git().Patch.PatchBuilder.Active() {
+		return errors.New(self.c.Tr.CantChangeRenameThresholdError)
+	}
+
+	return nil
 }

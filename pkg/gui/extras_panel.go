@@ -3,6 +3,7 @@ package gui
 import (
 	"io"
 
+	"github.com/jesseduffield/lazygit/pkg/gocui"
 	"github.com/jesseduffield/lazygit/pkg/gui/context"
 	"github.com/jesseduffield/lazygit/pkg/gui/style"
 	"github.com/jesseduffield/lazygit/pkg/gui/types"
@@ -14,12 +15,11 @@ func (gui *Gui) handleCreateExtrasMenuPanel() error {
 		Items: []*types.MenuItem{
 			{
 				Label: gui.c.Tr.ToggleShowCommandLog,
+				Keys:  []gocui.Key{gocui.NewKeyRune('t')},
 				OnPress: func() error {
 					currentContext := gui.c.Context().CurrentStatic()
 					if gui.c.State().GetShowExtrasWindow() && currentContext.GetKey() == context.COMMAND_LOG_CONTEXT_KEY {
-						if err := gui.c.Context().Pop(); err != nil {
-							return err
-						}
+						gui.c.Context().Pop()
 					}
 					show := !gui.c.State().GetShowExtrasWindow()
 					gui.c.State().SetShowExtrasWindow(show)
@@ -30,6 +30,7 @@ func (gui *Gui) handleCreateExtrasMenuPanel() error {
 			},
 			{
 				Label:   gui.c.Tr.FocusCommandLog,
+				Keys:    []gocui.Key{gocui.NewKeyRune('f')},
 				OnPress: gui.handleFocusCommandLog,
 			},
 		},
@@ -40,7 +41,8 @@ func (gui *Gui) handleFocusCommandLog() error {
 	gui.c.State().SetShowExtrasWindow(true)
 	// TODO: is this necessary? Can't I just call 'return from context'?
 	gui.State.Contexts.CommandLog.SetParentContext(gui.c.Context().CurrentSide())
-	return gui.c.Context().Push(gui.State.Contexts.CommandLog)
+	gui.c.Context().Push(gui.State.Contexts.CommandLog, types.OnFocusOpts{})
+	return nil
 }
 
 func (gui *Gui) scrollUpExtra() error {
@@ -55,6 +57,38 @@ func (gui *Gui) scrollDownExtra() error {
 	gui.Views.Extras.Autoscroll = false
 
 	gui.scrollDownView(gui.Views.Extras)
+
+	return nil
+}
+
+func (gui *Gui) pageUpExtrasPanel() error {
+	gui.Views.Extras.Autoscroll = false
+
+	gui.Views.Extras.ScrollUp(gui.Contexts().CommandLog.GetViewTrait().PageDelta())
+
+	return nil
+}
+
+func (gui *Gui) pageDownExtrasPanel() error {
+	gui.Views.Extras.Autoscroll = false
+
+	gui.Views.Extras.ScrollDown(gui.Contexts().CommandLog.GetViewTrait().PageDelta())
+
+	return nil
+}
+
+func (gui *Gui) goToExtrasPanelTop() error {
+	gui.Views.Extras.Autoscroll = false
+
+	gui.Views.Extras.ScrollUp(gui.Views.Extras.ViewLinesHeight())
+
+	return nil
+}
+
+func (gui *Gui) goToExtrasPanelBottom() error {
+	gui.Views.Extras.Autoscroll = true
+
+	gui.Views.Extras.ScrollDown(gui.Views.Extras.ViewLinesHeight())
 
 	return nil
 }

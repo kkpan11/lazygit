@@ -5,10 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/jesseduffield/gocui"
 	"github.com/jesseduffield/lazygit/pkg/commands/models"
+	"github.com/jesseduffield/lazygit/pkg/gocui"
 	"github.com/jesseduffield/lazygit/pkg/gui/context"
-	"github.com/jesseduffield/lazygit/pkg/gui/keybindings"
 	"github.com/jesseduffield/lazygit/pkg/gui/style"
 	"github.com/jesseduffield/lazygit/pkg/gui/types"
 	"github.com/jesseduffield/lazygit/pkg/utils"
@@ -27,7 +26,7 @@ func NewSubmodulesController(
 ) *SubmodulesController {
 	return &SubmodulesController{
 		baseController: baseController{},
-		ListControllerTrait: NewListControllerTrait[*models.SubmoduleConfig](
+		ListControllerTrait: NewListControllerTrait(
 			c,
 			c.Contexts().Submodules,
 			c.Contexts().Submodules.GetSelected,
@@ -40,21 +39,21 @@ func NewSubmodulesController(
 func (self *SubmodulesController) GetKeybindings(opts types.KeybindingsOpts) []*types.Binding {
 	return []*types.Binding{
 		{
-			Key:               opts.GetKey(opts.Config.Universal.GoInto),
+			Keys:              opts.GetKeys(opts.Config.Universal.GoInto),
 			Handler:           self.withItem(self.enter),
 			GetDisabledReason: self.require(self.singleItemSelected()),
 			Description:       self.c.Tr.Enter,
 			Tooltip: utils.ResolvePlaceholderString(self.c.Tr.EnterSubmoduleTooltip,
-				map[string]string{"escape": keybindings.Label(opts.Config.Universal.Return)}),
+				map[string]string{"escape": opts.Config.Universal.Return.String()}),
 			DisplayOnScreen: true,
 		},
 		{
-			Key:               opts.GetKey(opts.Config.Universal.Select),
+			Keys:              opts.GetKeys(opts.Config.Universal.Select),
 			Handler:           self.withItem(self.enter),
 			GetDisabledReason: self.require(self.singleItemSelected()),
 		},
 		{
-			Key:               opts.GetKey(opts.Config.Universal.Remove),
+			Keys:              opts.GetKeys(opts.Config.Universal.Remove),
 			Handler:           self.withItem(self.remove),
 			GetDisabledReason: self.require(self.singleItemSelected()),
 			Description:       self.c.Tr.Remove,
@@ -62,7 +61,7 @@ func (self *SubmodulesController) GetKeybindings(opts types.KeybindingsOpts) []*
 			DisplayOnScreen:   true,
 		},
 		{
-			Key:               opts.GetKey(opts.Config.Submodules.Update),
+			Keys:              opts.GetKeys(opts.Config.Submodules.Update),
 			Handler:           self.withItem(self.update),
 			GetDisabledReason: self.require(self.singleItemSelected()),
 			Description:       self.c.Tr.Update,
@@ -70,45 +69,44 @@ func (self *SubmodulesController) GetKeybindings(opts types.KeybindingsOpts) []*
 			DisplayOnScreen:   true,
 		},
 		{
-			Key:             opts.GetKey(opts.Config.Universal.New),
+			Keys:            opts.GetKeys(opts.Config.Universal.New),
 			Handler:         self.add,
 			Description:     self.c.Tr.NewSubmodule,
 			DisplayOnScreen: true,
 		},
 		{
-			Key:               opts.GetKey(opts.Config.Universal.Edit),
+			Keys:              opts.GetKeys(opts.Config.Universal.Edit),
 			Handler:           self.withItem(self.editURL),
 			GetDisabledReason: self.require(self.singleItemSelected()),
 			Description:       self.c.Tr.EditSubmoduleUrl,
 		},
 		{
-			Key:               opts.GetKey(opts.Config.Submodules.Init),
+			Keys:              opts.GetKeys(opts.Config.Submodules.Init),
 			Handler:           self.withItem(self.init),
 			GetDisabledReason: self.require(self.singleItemSelected()),
 			Description:       self.c.Tr.Initialize,
 			Tooltip:           self.c.Tr.InitSubmoduleTooltip,
 		},
 		{
-			Key:         opts.GetKey(opts.Config.Submodules.BulkMenu),
+			Keys:        opts.GetKeys(opts.Config.Submodules.BulkMenu),
 			Handler:     self.openBulkActionsMenu,
 			Description: self.c.Tr.ViewBulkSubmoduleOptions,
 			OpensMenu:   true,
 		},
 		{
-			Key:         nil,
 			Handler:     self.easterEgg,
 			Description: self.c.Tr.EasterEgg,
 		},
 	}
 }
 
-func (self *SubmodulesController) GetOnClick() func() error {
+func (self *SubmodulesController) GetOnDoubleClick() func() error {
 	return self.withItemGraceful(self.enter)
 }
 
-func (self *SubmodulesController) GetOnRenderToMain() func() error {
-	return func() error {
-		return self.c.Helpers().Diff.WithDiffModeCheck(func() error {
+func (self *SubmodulesController) GetOnRenderToMain() func() {
+	return func() {
+		self.c.Helpers().Diff.WithDiffModeCheck(func() {
 			var task types.UpdateTask
 			submodule := self.context().GetSelected()
 			if submodule == nil {
@@ -125,12 +123,12 @@ func (self *SubmodulesController) GetOnRenderToMain() func() error {
 				if file == nil {
 					task = types.NewRenderStringTask(prefix)
 				} else {
-					cmdObj := self.c.Git().WorkingTree.WorktreeFileDiffCmdObj(file, false, !file.HasUnstagedChanges && file.HasStagedChanges)
+					cmdObj := self.c.Git().WorkingTree.WorktreeFileDiffCmdObj(file, false, !file.HasUnstagedChanges && file.HasStagedChanges, file.Names())
 					task = types.NewRunCommandTaskWithPrefix(cmdObj.GetCmd(), prefix)
 				}
 			}
 
-			return self.c.RenderToMainViews(types.RefreshMainOpts{
+			self.c.RenderToMainViews(types.RefreshMainOpts{
 				Pair: self.c.MainViewPairs().Normal,
 				Main: &types.ViewUpdateOpts{
 					Title: "Submodule",
@@ -146,16 +144,16 @@ func (self *SubmodulesController) enter(submodule *models.SubmoduleConfig) error
 }
 
 func (self *SubmodulesController) add() error {
-	return self.c.Prompt(types.PromptOpts{
+	self.c.Prompt(types.PromptOpts{
 		Title: self.c.Tr.NewSubmoduleUrl,
 		HandleConfirm: func(submoduleUrl string) error {
 			nameSuggestion := filepath.Base(strings.TrimSuffix(submoduleUrl, filepath.Ext(submoduleUrl)))
 
-			return self.c.Prompt(types.PromptOpts{
+			self.c.Prompt(types.PromptOpts{
 				Title:          self.c.Tr.NewSubmoduleName,
 				InitialContent: nameSuggestion,
 				HandleConfirm: func(submoduleName string) error {
-					return self.c.Prompt(types.PromptOpts{
+					self.c.Prompt(types.PromptOpts{
 						Title:          self.c.Tr.NewSubmodulePath,
 						InitialContent: submoduleName,
 						HandleConfirm: func(submodulePath string) error {
@@ -166,18 +164,25 @@ func (self *SubmodulesController) add() error {
 									return err
 								}
 
-								return self.c.Refresh(types.RefreshOptions{Scope: []types.RefreshableView{types.SUBMODULES}})
+								self.c.RefreshFromWorker(types.RefreshOptions{Scope: []types.RefreshableView{types.SUBMODULES}})
+								return nil
 							})
 						},
 					})
+
+					return nil
 				},
 			})
+
+			return nil
 		},
 	})
+
+	return nil
 }
 
 func (self *SubmodulesController) editURL(submodule *models.SubmoduleConfig) error {
-	return self.c.Prompt(types.PromptOpts{
+	self.c.Prompt(types.PromptOpts{
 		Title:          fmt.Sprintf(self.c.Tr.UpdateSubmoduleUrl, submodule.FullName()),
 		InitialContent: submodule.Url,
 		HandleConfirm: func(newUrl string) error {
@@ -188,10 +193,13 @@ func (self *SubmodulesController) editURL(submodule *models.SubmoduleConfig) err
 					return err
 				}
 
-				return self.c.Refresh(types.RefreshOptions{Scope: []types.RefreshableView{types.SUBMODULES}})
+				self.c.RefreshFromWorker(types.RefreshOptions{Scope: []types.RefreshableView{types.SUBMODULES}})
+				return nil
 			})
 		},
 	})
+
+	return nil
 }
 
 func (self *SubmodulesController) init(submodule *models.SubmoduleConfig) error {
@@ -202,7 +210,8 @@ func (self *SubmodulesController) init(submodule *models.SubmoduleConfig) error 
 			return err
 		}
 
-		return self.c.Refresh(types.RefreshOptions{Scope: []types.RefreshableView{types.SUBMODULES}})
+		self.c.RefreshFromWorker(types.RefreshOptions{Scope: []types.RefreshableView{types.SUBMODULES}})
+		return nil
 	})
 }
 
@@ -220,10 +229,11 @@ func (self *SubmodulesController) openBulkActionsMenu() error {
 							return err
 						}
 
-						return self.c.Refresh(types.RefreshOptions{Scope: []types.RefreshableView{types.SUBMODULES}})
+						self.c.RefreshFromWorker(types.RefreshOptions{Scope: []types.RefreshableView{types.SUBMODULES}})
+						return nil
 					})
 				},
-				Key: 'i',
+				Keys: menuKey('i'),
 			},
 			{
 				LabelColumns: []string{self.c.Tr.BulkUpdateSubmodules, style.FgYellow.Sprint(self.c.Git().Submodule.BulkUpdateCmdObj().ToString())},
@@ -234,10 +244,26 @@ func (self *SubmodulesController) openBulkActionsMenu() error {
 							return err
 						}
 
-						return self.c.Refresh(types.RefreshOptions{Scope: []types.RefreshableView{types.SUBMODULES}})
+						self.c.RefreshFromWorker(types.RefreshOptions{Scope: []types.RefreshableView{types.SUBMODULES}})
+						return nil
 					})
 				},
-				Key: 'u',
+				Keys: menuKey('u'),
+			},
+			{
+				LabelColumns: []string{self.c.Tr.BulkUpdateRecursiveSubmodules, style.FgYellow.Sprint(self.c.Git().Submodule.BulkUpdateRecursivelyCmdObj().ToString())},
+				OnPress: func() error {
+					return self.c.WithWaitingStatus(self.c.Tr.RunningCommand, func(gocui.Task) error {
+						self.c.LogAction(self.c.Tr.Actions.BulkUpdateRecursiveSubmodules)
+						if err := self.c.Git().Submodule.BulkUpdateRecursivelyCmdObj().Run(); err != nil {
+							return err
+						}
+
+						self.c.RefreshFromWorker(types.RefreshOptions{Scope: []types.RefreshableView{types.SUBMODULES}})
+						return nil
+					})
+				},
+				Keys: menuKey('r'),
 			},
 			{
 				LabelColumns: []string{self.c.Tr.BulkDeinitSubmodules, style.FgRed.Sprint(self.c.Git().Submodule.BulkDeinitCmdObj().ToString())},
@@ -248,10 +274,11 @@ func (self *SubmodulesController) openBulkActionsMenu() error {
 							return err
 						}
 
-						return self.c.Refresh(types.RefreshOptions{Scope: []types.RefreshableView{types.SUBMODULES}})
+						self.c.RefreshFromWorker(types.RefreshOptions{Scope: []types.RefreshableView{types.SUBMODULES}})
+						return nil
 					})
 				},
-				Key: 'd',
+				Keys: menuKey('d'),
 			},
 		},
 	})
@@ -265,12 +292,13 @@ func (self *SubmodulesController) update(submodule *models.SubmoduleConfig) erro
 			return err
 		}
 
-		return self.c.Refresh(types.RefreshOptions{Scope: []types.RefreshableView{types.SUBMODULES}})
+		self.c.RefreshFromWorker(types.RefreshOptions{Scope: []types.RefreshableView{types.SUBMODULES}})
+		return nil
 	})
 }
 
 func (self *SubmodulesController) remove(submodule *models.SubmoduleConfig) error {
-	return self.c.Confirm(types.ConfirmOpts{
+	self.c.Confirm(types.ConfirmOpts{
 		Title:  self.c.Tr.RemoveSubmodule,
 		Prompt: fmt.Sprintf(self.c.Tr.RemoveSubmodulePrompt, submodule.FullName()),
 		HandleConfirm: func() error {
@@ -279,13 +307,17 @@ func (self *SubmodulesController) remove(submodule *models.SubmoduleConfig) erro
 				return err
 			}
 
-			return self.c.Refresh(types.RefreshOptions{Scope: []types.RefreshableView{types.SUBMODULES, types.FILES}})
+			self.c.Refresh(types.RefreshOptions{Scope: []types.RefreshableView{types.SUBMODULES, types.FILES}})
+			return nil
 		},
 	})
+
+	return nil
 }
 
 func (self *SubmodulesController) easterEgg() error {
-	return self.c.Context().Push(self.c.Contexts().Snake)
+	self.c.Context().Push(self.c.Contexts().Snake, types.OnFocusOpts{})
+	return nil
 }
 
 func (self *SubmodulesController) context() *context.SubmodulesContext {

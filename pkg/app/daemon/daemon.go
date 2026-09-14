@@ -3,16 +3,13 @@ package daemon
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"strconv"
 
-	"github.com/jesseduffield/lazygit/pkg/commands/models"
-	"github.com/jesseduffield/lazygit/pkg/common"
 	"github.com/jesseduffield/lazygit/pkg/utils"
 	"github.com/samber/lo"
-	"github.com/stefanhaller/git-todo-parser/todo"
+	"github.com/sirupsen/logrus"
 )
 
 // Sometimes lazygit will be invoked in daemon mode from a parent lazygit process.
@@ -34,11 +31,11 @@ const (
 
 	DaemonKindExitImmediately
 	DaemonKindRemoveUpdateRefsForCopiedBranch
-	DaemonKindCherryPick
 	DaemonKindMoveTodosUp
 	DaemonKindMoveTodosDown
 	DaemonKindInsertBreak
 	DaemonKindChangeTodoActions
+	DaemonKindDropMergeCommit
 	DaemonKindMoveFixupCommitDown
 	DaemonKindWriteRebaseTodo
 )
@@ -56,8 +53,8 @@ func getInstruction() Instruction {
 	mapping := map[DaemonKind]func(string) Instruction{
 		DaemonKindExitImmediately:                 deserializeInstruction[*ExitImmediatelyInstruction],
 		DaemonKindRemoveUpdateRefsForCopiedBranch: deserializeInstruction[*RemoveUpdateRefsForCopiedBranchInstruction],
-		DaemonKindCherryPick:                      deserializeInstruction[*CherryPickCommitsInstruction],
 		DaemonKindChangeTodoActions:               deserializeInstruction[*ChangeTodoActionsInstruction],
+		DaemonKindDropMergeCommit:                 deserializeInstruction[*DropMergeCommitInstruction],
 		DaemonKindMoveFixupCommitDown:             deserializeInstruction[*MoveFixupCommitDownInstruction],
 		DaemonKindMoveTodosUp:                     deserializeInstruction[*MoveTodosUpInstruction],
 		DaemonKindMoveTodosDown:                   deserializeInstruction[*MoveTodosDownInstruction],
@@ -68,18 +65,16 @@ func getInstruction() Instruction {
 	return mapping[getDaemonKind()](jsonData)
 }
 
-func Handle(common *common.Common) {
+func Handle(log *logrus.Entry) {
 	if !InDaemonMode() {
 		return
 	}
 
 	instruction := getInstruction()
 
-	if err := instruction.run(common); err != nil {
+	if err := instruction.run(log); err != nil {
 		log.Fatal(err)
 	}
-
-	os.Exit(0)
 }
 
 func InDaemonMode() bool {
@@ -111,7 +106,7 @@ type Instruction interface {
 	SerializedInstructions() string
 
 	// runs the instruction
-	run(common *common.Common) error
+	run(log *logrus.Entry) error
 }
 
 func serializeInstruction[T any](instruction T) string {
@@ -151,7 +146,7 @@ func (self *ExitImmediatelyInstruction) SerializedInstructions() string {
 	return serializeInstruction(self)
 }
 
-func (self *ExitImmediatelyInstruction) run(common *common.Common) error {
+func (self *ExitImmediatelyInstruction) run(log *logrus.Entry) error {
 	return nil
 }
 
@@ -169,47 +164,14 @@ func (self *RemoveUpdateRefsForCopiedBranchInstruction) SerializedInstructions()
 	return serializeInstruction(self)
 }
 
-func (self *RemoveUpdateRefsForCopiedBranchInstruction) run(common *common.Common) error {
-	return handleInteractiveRebase(common, func(path string) error {
+func (self *RemoveUpdateRefsForCopiedBranchInstruction) run(log *logrus.Entry) error {
+	return handleInteractiveRebase(log, func(path string) error {
 		return nil
 	})
 }
 
 func NewRemoveUpdateRefsForCopiedBranchInstruction() Instruction {
 	return &RemoveUpdateRefsForCopiedBranchInstruction{}
-}
-
-type CherryPickCommitsInstruction struct {
-	Todo string
-}
-
-func NewCherryPickCommitsInstruction(commits []*models.Commit) Instruction {
-	todoLines := lo.Map(commits, func(commit *models.Commit, _ int) TodoLine {
-		return TodoLine{
-			Action: "pick",
-			Commit: commit,
-		}
-	})
-
-	todo := TodoLinesToString(todoLines)
-
-	return &CherryPickCommitsInstruction{
-		Todo: todo,
-	}
-}
-
-func (self *CherryPickCommitsInstruction) Kind() DaemonKind {
-	return DaemonKindCherryPick
-}
-
-func (self *CherryPickCommitsInstruction) SerializedInstructions() string {
-	return serializeInstruction(self)
-}
-
-func (self *CherryPickCommitsInstruction) run(common *common.Common) error {
-	return handleInteractiveRebase(common, func(path string) error {
-		return utils.PrependStrToTodoFile(path, []byte(self.Todo))
-	})
 }
 
 type ChangeTodoActionsInstruction struct {
@@ -230,13 +192,13 @@ func (self *ChangeTodoActionsInstruction) SerializedInstructions() string {
 	return serializeInstruction(self)
 }
 
-func (self *ChangeTodoActionsInstruction) run(common *common.Common) error {
-	return handleInteractiveRebase(common, func(path string) error {
+func (self *ChangeTodoActionsInstruction) run(log *logrus.Entry) error {
+	return handleInteractiveRebase(log, func(path string) error {
 		changes := lo.Map(self.Changes, func(c ChangeTodoAction, _ int) utils.TodoChange {
 			return utils.TodoChange{
 				Hash:      c.Hash,
-				OldAction: todo.Pick,
 				NewAction: c.NewAction,
+				Flag:      c.Flag,
 			}
 		})
 
@@ -244,18 +206,44 @@ func (self *ChangeTodoActionsInstruction) run(common *common.Common) error {
 	})
 }
 
-// Takes the hash of some commit, and the hash of a fixup commit that was created
-// at the end of the branch, then moves the fixup commit down to right after the
-// original commit, changing its type to "fixup"
-type MoveFixupCommitDownInstruction struct {
-	OriginalHash string
-	FixupHash    string
+type DropMergeCommitInstruction struct {
+	Hash string
 }
 
-func NewMoveFixupCommitDownInstruction(originalHash string, fixupHash string) Instruction {
+func NewDropMergeCommitInstruction(hash string) Instruction {
+	return &DropMergeCommitInstruction{
+		Hash: hash,
+	}
+}
+
+func (self *DropMergeCommitInstruction) Kind() DaemonKind {
+	return DaemonKindDropMergeCommit
+}
+
+func (self *DropMergeCommitInstruction) SerializedInstructions() string {
+	return serializeInstruction(self)
+}
+
+func (self *DropMergeCommitInstruction) run(log *logrus.Entry) error {
+	return handleInteractiveRebase(log, func(path string) error {
+		return utils.DropMergeCommit(path, self.Hash, getCommentChar())
+	})
+}
+
+// Takes the hash of some commit, and the hash of a fixup commit that was created
+// at the end of the branch, then moves the fixup commit down to right after the
+// original commit, changing its type to "fixup" (only if ChangeToFixup is true)
+type MoveFixupCommitDownInstruction struct {
+	OriginalHash  string
+	FixupHash     string
+	ChangeToFixup bool
+}
+
+func NewMoveFixupCommitDownInstruction(originalHash string, fixupHash string, changeToFixup bool) Instruction {
 	return &MoveFixupCommitDownInstruction{
-		OriginalHash: originalHash,
-		FixupHash:    fixupHash,
+		OriginalHash:  originalHash,
+		FixupHash:     fixupHash,
+		ChangeToFixup: changeToFixup,
 	}
 }
 
@@ -267,19 +255,21 @@ func (self *MoveFixupCommitDownInstruction) SerializedInstructions() string {
 	return serializeInstruction(self)
 }
 
-func (self *MoveFixupCommitDownInstruction) run(common *common.Common) error {
-	return handleInteractiveRebase(common, func(path string) error {
-		return utils.MoveFixupCommitDown(path, self.OriginalHash, self.FixupHash, getCommentChar())
+func (self *MoveFixupCommitDownInstruction) run(log *logrus.Entry) error {
+	return handleInteractiveRebase(log, func(path string) error {
+		return utils.MoveFixupCommitDown(path, self.OriginalHash, self.FixupHash, self.ChangeToFixup, getCommentChar())
 	})
 }
 
 type MoveTodosUpInstruction struct {
-	Hashes []string
+	Hashes   []string
+	Distance int
 }
 
-func NewMoveTodosUpInstruction(hashes []string) Instruction {
+func NewMoveTodosUpInstruction(hashes []string, distance int) Instruction {
 	return &MoveTodosUpInstruction{
-		Hashes: hashes,
+		Hashes:   hashes,
+		Distance: distance,
 	}
 }
 
@@ -291,26 +281,27 @@ func (self *MoveTodosUpInstruction) SerializedInstructions() string {
 	return serializeInstruction(self)
 }
 
-func (self *MoveTodosUpInstruction) run(common *common.Common) error {
+func (self *MoveTodosUpInstruction) run(log *logrus.Entry) error {
 	todosToMove := lo.Map(self.Hashes, func(hash string, _ int) utils.Todo {
 		return utils.Todo{
-			Hash:   hash,
-			Action: todo.Pick,
+			Hash: hash,
 		}
 	})
 
-	return handleInteractiveRebase(common, func(path string) error {
-		return utils.MoveTodosUp(path, todosToMove, getCommentChar())
+	return handleInteractiveRebase(log, func(path string) error {
+		return utils.MoveTodos(path, todosToMove, false, -self.Distance, getCommentChar())
 	})
 }
 
 type MoveTodosDownInstruction struct {
-	Hashes []string
+	Hashes   []string
+	Distance int
 }
 
-func NewMoveTodosDownInstruction(hashes []string) Instruction {
+func NewMoveTodosDownInstruction(hashes []string, distance int) Instruction {
 	return &MoveTodosDownInstruction{
-		Hashes: hashes,
+		Hashes:   hashes,
+		Distance: distance,
 	}
 }
 
@@ -322,16 +313,15 @@ func (self *MoveTodosDownInstruction) SerializedInstructions() string {
 	return serializeInstruction(self)
 }
 
-func (self *MoveTodosDownInstruction) run(common *common.Common) error {
+func (self *MoveTodosDownInstruction) run(log *logrus.Entry) error {
 	todosToMove := lo.Map(self.Hashes, func(hash string, _ int) utils.Todo {
 		return utils.Todo{
-			Hash:   hash,
-			Action: todo.Pick,
+			Hash: hash,
 		}
 	})
 
-	return handleInteractiveRebase(common, func(path string) error {
-		return utils.MoveTodosDown(path, todosToMove, getCommentChar())
+	return handleInteractiveRebase(log, func(path string) error {
+		return utils.MoveTodos(path, todosToMove, false, self.Distance, getCommentChar())
 	})
 }
 
@@ -349,8 +339,8 @@ func (self *InsertBreakInstruction) SerializedInstructions() string {
 	return serializeInstruction(self)
 }
 
-func (self *InsertBreakInstruction) run(common *common.Common) error {
-	return handleInteractiveRebase(common, func(path string) error {
+func (self *InsertBreakInstruction) run(log *logrus.Entry) error {
+	return handleInteractiveRebase(log, func(path string) error {
 		return utils.PrependStrToTodoFile(path, []byte("break\n"))
 	})
 }
@@ -373,8 +363,8 @@ func (self *WriteRebaseTodoInstruction) SerializedInstructions() string {
 	return serializeInstruction(self)
 }
 
-func (self *WriteRebaseTodoInstruction) run(common *common.Common) error {
-	return handleInteractiveRebase(common, func(path string) error {
+func (self *WriteRebaseTodoInstruction) run(log *logrus.Entry) error {
+	return handleInteractiveRebase(log, func(path string) error {
 		return os.WriteFile(path, self.TodosFileContent, 0o644)
 	})
 }

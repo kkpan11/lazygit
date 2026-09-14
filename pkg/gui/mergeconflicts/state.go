@@ -4,12 +4,16 @@ import (
 	"strings"
 
 	"github.com/jesseduffield/lazygit/pkg/utils"
+	"github.com/samber/lo"
 )
 
 // State represents the selection state of the merge conflict context.
 type State struct {
 	// path of the file with the conflicts
 	path string
+
+	// the file's conflict-marker-size gitattribute, or 0 if it doesn't have one
+	markerSize int
 
 	// This is a stack of the file content. It is used to undo changes.
 	// The last item is the current file content.
@@ -37,14 +41,14 @@ func (s *State) setConflictIndex(index int) {
 	if len(s.conflicts) == 0 {
 		s.conflictIndex = 0
 	} else {
-		s.conflictIndex = utils.Clamp(index, 0, len(s.conflicts)-1)
+		s.conflictIndex = lo.Clamp(index, 0, len(s.conflicts)-1)
 	}
 	s.setSelectionIndex(s.selectionIndex)
 }
 
 func (s *State) setSelectionIndex(index int) {
 	if selections := s.availableSelections(); len(selections) != 0 {
-		s.selectionIndex = utils.Clamp(index, 0, len(selections)-1)
+		s.selectionIndex = lo.Clamp(index, 0, len(selections)-1)
 	}
 }
 
@@ -73,12 +77,13 @@ func (s *State) currentConflict() *mergeConflict {
 }
 
 // this is for starting a new merge conflict session
-func (s *State) SetContent(content string, path string) {
-	if content == s.GetContent() && path == s.path {
+func (s *State) SetContent(content string, path string, markerSize int) {
+	if content == s.GetContent() && path == s.path && markerSize == s.markerSize {
 		return
 	}
 
 	s.path = path
+	s.markerSize = markerSize
 	s.contents = []string{}
 	s.PushContent(content)
 }
@@ -87,7 +92,7 @@ func (s *State) SetContent(content string, path string) {
 // state
 func (s *State) PushContent(content string) {
 	s.contents = append(s.contents, content)
-	s.setConflicts(findConflicts(content))
+	s.setConflicts(findConflicts(content, s.markerSize))
 }
 
 func (s *State) GetContent() string {
@@ -102,6 +107,10 @@ func (s *State) GetPath() string {
 	return s.path
 }
 
+func (s *State) GetMarkerSize() int {
+	return s.markerSize
+}
+
 func (s *State) Undo() bool {
 	if len(s.contents) <= 1 {
 		return false
@@ -111,7 +120,7 @@ func (s *State) Undo() bool {
 
 	newContent := s.GetContent()
 	// We could be storing the old conflicts and selected index on a stack too.
-	s.setConflicts(findConflicts(newContent))
+	s.setConflicts(findConflicts(newContent, s.markerSize))
 
 	return true
 }
@@ -146,6 +155,7 @@ func (s *State) AllConflictsResolved() bool {
 func (s *State) Reset() {
 	s.contents = []string{}
 	s.path = ""
+	s.markerSize = 0
 }
 
 // we're not resetting selectedIndex here because the user typically would want

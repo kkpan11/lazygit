@@ -25,7 +25,7 @@ var ShowDivergenceFromBaseBranch = NewIntegrationTest(NewIntegrationTestArgs{
 		t.Views().Branches().
 			Focus().
 			Lines(
-				Contains("feature ↓1").IsSelected(),
+				MatchesRegexp(`feature\s+↓1`).IsSelected(),
 				Contains("master"),
 			).
 			Press(keys.Branches.SetUpstream)
@@ -37,9 +37,9 @@ var ShowDivergenceFromBaseBranch = NewIntegrationTest(NewIntegrationTestArgs{
 			IsFocused().
 			Title(Contains("Commits (feature <-> master)")).
 			Lines(
-				DoesNotContainAnyOf("↓", "↑").Contains("--- Remote ---"),
+				DoesNotContainAnyOf("↓", "↑").Contains("─── Remote"),
 				Contains("↓").Contains("master 3"),
-				DoesNotContainAnyOf("↓", "↑").Contains("--- Local ---"),
+				DoesNotContainAnyOf("↓", "↑").Contains("─── Local"),
 				Contains("↑").Contains("feature 2"),
 				Contains("↑").Contains("feature 1"),
 			)

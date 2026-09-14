@@ -23,7 +23,7 @@ func TestGetCommitFilesFromFilenames(t *testing.T) {
 			input:    "MM\x00Myfile\x00",
 			output: []*models.CommitFile{
 				{
-					Name:         "Myfile",
+					Path:         "Myfile",
 					ChangeStatus: "MM",
 				},
 			},
@@ -33,11 +33,11 @@ func TestGetCommitFilesFromFilenames(t *testing.T) {
 			input:    "MM\x00Myfile\x00M \x00MyOtherFile\x00",
 			output: []*models.CommitFile{
 				{
-					Name:         "Myfile",
+					Path:         "Myfile",
 					ChangeStatus: "MM",
 				},
 				{
-					Name:         "MyOtherFile",
+					Path:         "MyOtherFile",
 					ChangeStatus: "M ",
 				},
 			},
@@ -47,16 +47,35 @@ func TestGetCommitFilesFromFilenames(t *testing.T) {
 			input:    "MM\x00Myfile\x00M \x00MyOtherFile\x00 M\x00YetAnother\x00",
 			output: []*models.CommitFile{
 				{
-					Name:         "Myfile",
+					Path:         "Myfile",
 					ChangeStatus: "MM",
 				},
 				{
-					Name:         "MyOtherFile",
+					Path:         "MyOtherFile",
 					ChangeStatus: "M ",
 				},
 				{
-					Name:         "YetAnother",
+					Path:         "YetAnother",
 					ChangeStatus: " M",
+				},
+			},
+		},
+		{
+			testName: "a rename among regular files",
+			input:    "M\x00Myfile\x00R100\x00before\x00after\x00A\x00Added\x00",
+			output: []*models.CommitFile{
+				{
+					Path:         "Myfile",
+					ChangeStatus: "M",
+				},
+				{
+					Path:         "after",
+					PreviousPath: "before",
+					ChangeStatus: "R",
+				},
+				{
+					Path:         "Added",
+					ChangeStatus: "A",
 				},
 			},
 		},

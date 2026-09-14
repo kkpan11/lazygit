@@ -15,10 +15,20 @@ type IGitConfig interface {
 	GetGeneral(string) string
 	// this is for when you want to pass 'mykey' and check if the result is truthy
 	GetBool(string) bool
+
+	// SetDir pins the config commands to the given repo directory, so that
+	// they keep reading that repo's local config even if the process working
+	// directory changes later (i.e. the user switches repos while this
+	// instance is still in use by in-flight work). Called once, before the
+	// first read.
+	SetDir(string)
+
+	DropCache()
 }
 
 type CachedGitConfig struct {
 	cache           map[string]string
+	dir             string
 	runGitConfigCmd func(*exec.Cmd) (string, error)
 	log             *logrus.Entry
 	mutex           sync.Mutex
@@ -35,6 +45,13 @@ func NewCachedGitConfig(runGitConfigCmd func(*exec.Cmd) (string, error), log *lo
 		log:             log,
 		mutex:           sync.Mutex{},
 	}
+}
+
+func (self *CachedGitConfig) SetDir(dir string) {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+
+	self.dir = dir
 }
 
 func (self *CachedGitConfig) Get(key string) string {
@@ -67,6 +84,7 @@ func (self *CachedGitConfig) GetGeneral(args string) string {
 
 func (self *CachedGitConfig) getGeneralAux(args string) string {
 	cmd := getGitConfigGeneralCmd(args)
+	cmd.Dir = self.dir
 	value, err := self.runGitConfigCmd(cmd)
 	if err != nil {
 		self.log.Debugf("Error getting git config value for args: %s. Error: %v", args, err.Error())
@@ -77,6 +95,7 @@ func (self *CachedGitConfig) getGeneralAux(args string) string {
 
 func (self *CachedGitConfig) getAux(key string) string {
 	cmd := getGitConfigCmd(key)
+	cmd.Dir = self.dir
 	value, err := self.runGitConfigCmd(cmd)
 	if err != nil {
 		self.log.Debugf("Error getting git config value for key: %s. Error: %v", key, err.Error())
@@ -92,4 +111,11 @@ func (self *CachedGitConfig) GetBool(key string) bool {
 func isTruthy(value string) bool {
 	lcValue := strings.ToLower(value)
 	return lcValue == "true" || lcValue == "1" || lcValue == "yes" || lcValue == "on"
+}
+
+func (self *CachedGitConfig) DropCache() {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+
+	self.cache = make(map[string]string)
 }

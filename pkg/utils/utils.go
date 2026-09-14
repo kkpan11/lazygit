@@ -4,14 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
-	"time"
 
-	"github.com/jesseduffield/gocui"
-	"github.com/jesseduffield/lazygit/pkg/config"
+	"github.com/jesseduffield/lazygit/pkg/gocui"
 )
 
 // GetProjectRoot returns the path to the root of the project. Only to be used
@@ -25,13 +24,6 @@ func GetProjectRoot() string {
 	return strings.Split(dir, "lazygit")[0] + "lazygit"
 }
 
-// Loader dumps a string to be displayed as a loader
-func Loader(now time.Time, config config.SpinnerConfig) string {
-	milliseconds := now.UnixMilli()
-	index := milliseconds / int64(config.Rate) % int64(len(config.Frames))
-	return config.Frames[index]
-}
-
 func SortRange(x int, y int) (int, int) {
 	if x < y {
 		return x, y
@@ -39,16 +31,7 @@ func SortRange(x int, y int) (int, int) {
 	return y, x
 }
 
-func Clamp(x int, min int, max int) int {
-	if x < min {
-		return min
-	} else if x > max {
-		return max
-	}
-	return x
-}
-
-func AsJson(i interface{}) string {
+func AsJson(i any) string {
 	bytes, _ := json.MarshalIndent(i, "", "    ")
 	return string(bytes)
 }
@@ -63,9 +46,8 @@ func ModuloWithWrap(n, max int) int {
 		return n % max
 	} else if n < 0 {
 		return max + n
-	} else {
-		return n
 	}
+	return n
 }
 
 func FindStringSubmatch(str string, regexpStr string) (bool, []string) {
@@ -113,5 +95,49 @@ func StackTrace() string {
 // 'skip' is the number of stack frames to skip.
 func FilePath(skip int) string {
 	_, path, _, _ := runtime.Caller(skip)
+	return path
+}
+
+// ExpandTilde expands a leading "~" that refers to the current user's home
+// directory: "~" and "~/foo" become e.g. "/home/user" and "/home/user/foo". A
+// tilde anywhere other than the start, or one immediately followed by a
+// username ("~other/foo"), is left untouched, as is the path if the home
+// directory can't be determined. We expand it ourselves because lazygit runs
+// git directly, with no shell to do it for us.
+func ExpandTilde(path string) string {
+	if path != "~" && !strings.HasPrefix(path, "~/") &&
+		!(runtime.GOOS == "windows" && strings.HasPrefix(path, `~\`)) {
+		return path
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+
+	if path == "~" {
+		return home
+	}
+	return filepath.Join(home, path[2:])
+}
+
+// ContractTilde is the inverse of ExpandTilde: it replaces the current user's
+// home directory at the start of a path with "~", so that paths can be shown
+// in a shorter form. Paths outside the home directory are left untouched, as
+// is the path if the home directory can't be determined.
+func ContractTilde(path string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+
+	if path == home {
+		return "~"
+	}
+
+	if rest, found := strings.CutPrefix(path, home+string(filepath.Separator)); found {
+		return "~" + string(filepath.Separator) + rest
+	}
+
 	return path
 }

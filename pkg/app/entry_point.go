@@ -8,6 +8,7 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
@@ -29,16 +30,17 @@ type cliArgs struct {
 	RepoPath           string
 	FilterPath         string
 	GitArg             string
+	UseConfigDir       string
+	WorkTree           string
+	GitDir             string
+	CustomConfigFile   string
+	ScreenMode         string
 	PrintVersionInfo   bool
 	Debug              bool
 	TailLogs           bool
 	Profile            bool
 	PrintDefaultConfig bool
 	PrintConfigDir     bool
-	UseConfigDir       string
-	WorkTree           string
-	GitDir             string
-	CustomConfigFile   string
 }
 
 type BuildInfo struct {
@@ -91,6 +93,15 @@ func Start(buildInfo *BuildInfo, integrationTest integrationTypes.IntegrationTes
 		env.SetGitDirEnv(cliArgs.GitDir)
 	}
 
+	// The log file lives in the config dir, so this must come after setting the
+	// CONFIG_DIR env var above.
+	logger := NewLogger(cliArgs.Debug)
+
+	if daemon.InDaemonMode() {
+		daemon.Handle(logger)
+		return
+	}
+
 	if cliArgs.PrintVersionInfo {
 		gitVersion := getGitVersionInfo()
 		fmt.Printf("commit=%s, build date=%s, build source=%s, version=%s, os=%s, arch=%s, git version=%s\n", buildInfo.Commit, buildInfo.Date, buildInfo.BuildSource, buildInfo.Version, runtime.GOOS, runtime.GOARCH, gitVersion)
@@ -100,7 +111,7 @@ func Start(buildInfo *BuildInfo, integrationTest integrationTypes.IntegrationTes
 	if cliArgs.PrintDefaultConfig {
 		var buf bytes.Buffer
 		encoder := yaml.NewEncoder(&buf)
-		err := encoder.Encode(config.GetDefaultConfig())
+		err := encoder.Encode(config.GetDefaultConfigForPlatform(config.KeybindingPlatform()))
 		if err != nil {
 			log.Fatal(err.Error())
 		}
@@ -123,8 +134,13 @@ func Start(buildInfo *BuildInfo, integrationTest integrationTypes.IntegrationTes
 		os.Exit(0)
 	}
 
-	tempDir, err := os.MkdirTemp("", "lazygit-*")
+	tempDirBase := getTempDirBase()
+	tempDir, err := os.MkdirTemp(tempDirBase, "lazygit-*")
 	if err != nil {
+		if os.IsPermission(err) {
+			log.Fatalf("Your temp directory (%s) is not writeable. Try if rebooting your machine fixes this.", tempDirBase)
+		}
+
 		log.Fatal(err.Error())
 	}
 	defer os.RemoveAll(tempDir)
@@ -136,6 +152,9 @@ func Start(buildInfo *BuildInfo, integrationTest integrationTypes.IntegrationTes
 
 	if integrationTest != nil {
 		integrationTest.SetupConfig(appConfig)
+		// Set this to true so that integration tests don't have to explicitly deal with the hunk
+		// staging hint:
+		appConfig.GetAppState().DidShowHunkStagingHint = true
 
 		// Preserve the changes that the test setup just made to the config, so
 		// they don't get lost when we reload the config while running the test
@@ -144,14 +163,9 @@ func Start(buildInfo *BuildInfo, integrationTest integrationTypes.IntegrationTes
 		appConfig.SaveGlobalUserConfig()
 	}
 
-	common, err := NewCommon(appConfig)
+	common, err := NewCommon(appConfig, logger)
 	if err != nil {
 		log.Fatal(err)
-	}
-
-	if daemon.InDaemonMode() {
-		daemon.Handle(common)
-		return
 	}
 
 	if cliArgs.Profile {
@@ -164,7 +178,7 @@ func Start(buildInfo *BuildInfo, integrationTest integrationTypes.IntegrationTes
 
 	parsedGitArg := parseGitArg(cliArgs.GitArg)
 
-	Run(appConfig, common, appTypes.NewStartArgs(cliArgs.FilterPath, parsedGitArg, integrationTest))
+	Run(appConfig, common, appTypes.NewStartArgs(cliArgs.FilterPath, parsedGitArg, cliArgs.ScreenMode, integrationTest))
 }
 
 func parseCliArgsAndEnvVars() *cliArgs {
@@ -209,6 +223,9 @@ func parseCliArgsAndEnvVars() *cliArgs {
 	customConfigFile := ""
 	flaggy.String(&customConfigFile, "ucf", "use-config-file", "Comma separated list to custom config file(s)")
 
+	screenMode := ""
+	flaggy.String(&screenMode, "sm", "screen-mode", "The initial screen-mode, which determines the size of the focused panel. Valid options: 'normal' (default), 'half', 'full'")
+
 	flaggy.Parse()
 
 	if os.Getenv("DEBUG") == "TRUE" {
@@ -229,6 +246,7 @@ func parseCliArgsAndEnvVars() *cliArgs {
 		WorkTree:           workTree,
 		GitDir:             gitDir,
 		CustomConfigFile:   customConfigFile,
+		ScreenMode:         screenMode,
 	}
 }
 
@@ -301,4 +319,20 @@ func getGitVersionInfo() string {
 	stdout, _ := cmd.Output()
 	gitVersion := strings.Trim(strings.TrimPrefix(string(stdout), "git version "), " \r\n")
 	return gitVersion
+}
+
+func getTempDirBase() string {
+	tempDir := os.TempDir()
+
+	user, err := user.Current()
+	if err != nil || user.Uid == "" {
+		return tempDir
+	}
+
+	tmpDirBase := filepath.Join(tempDir, "lazygit-"+user.Uid)
+	if err := os.MkdirAll(tmpDirBase, 0o700); err != nil {
+		return tempDir
+	}
+
+	return tmpDirBase
 }

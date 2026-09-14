@@ -2,7 +2,6 @@ package controllers
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/jesseduffield/lazygit/pkg/gui/types"
 )
@@ -42,7 +41,7 @@ func (self *FilteringMenuAction) Call() error {
 		menuItems = append(menuItems, &types.MenuItem{
 			Label: fmt.Sprintf("%s '%s'", self.c.Tr.FilterBy, fileName),
 			OnPress: func() error {
-				return self.setFilteringPath(fileName)
+				return self.c.Helpers().Mode.SetFilteringPath(fileName)
 			},
 			Tooltip: tooltip,
 		})
@@ -52,7 +51,7 @@ func (self *FilteringMenuAction) Call() error {
 		menuItems = append(menuItems, &types.MenuItem{
 			Label: fmt.Sprintf("%s '%s'", self.c.Tr.FilterBy, author),
 			OnPress: func() error {
-				return self.setFilteringAuthor(author)
+				return self.c.Helpers().Mode.SetFilteringAuthor(author)
 			},
 			Tooltip: tooltip,
 		})
@@ -61,13 +60,15 @@ func (self *FilteringMenuAction) Call() error {
 	menuItems = append(menuItems, &types.MenuItem{
 		Label: self.c.Tr.FilterPathOption,
 		OnPress: func() error {
-			return self.c.Prompt(types.PromptOpts{
+			self.c.Prompt(types.PromptOpts{
 				FindSuggestionsFunc: self.c.Helpers().Suggestions.GetFilePathSuggestionsFunc(),
 				Title:               self.c.Tr.EnterFileName,
 				HandleConfirm: func(response string) error {
-					return self.setFilteringPath(strings.TrimSpace(response))
+					return self.c.Helpers().Mode.SetFilteringPath(response)
 				},
 			})
+
+			return nil
 		},
 		Tooltip: tooltip,
 	})
@@ -75,13 +76,15 @@ func (self *FilteringMenuAction) Call() error {
 	menuItems = append(menuItems, &types.MenuItem{
 		Label: self.c.Tr.FilterAuthorOption,
 		OnPress: func() error {
-			return self.c.Prompt(types.PromptOpts{
+			self.c.Prompt(types.PromptOpts{
 				FindSuggestionsFunc: self.c.Helpers().Suggestions.GetAuthorsSuggestionsFunc(),
 				Title:               self.c.Tr.EnterAuthor,
 				HandleConfirm: func(response string) error {
-					return self.setFilteringAuthor(strings.TrimSpace(response))
+					return self.c.Helpers().Mode.SetFilteringAuthor(response)
 				},
 			})
+
+			return nil
 		},
 		Tooltip: tooltip,
 	})
@@ -94,35 +97,4 @@ func (self *FilteringMenuAction) Call() error {
 	}
 
 	return self.c.Menu(types.CreateMenuOptions{Title: self.c.Tr.FilteringMenuTitle, Items: menuItems})
-}
-
-func (self *FilteringMenuAction) setFilteringPath(path string) error {
-	self.c.Modes().Filtering.Reset()
-	self.c.Modes().Filtering.SetPath(path)
-	return self.setFiltering()
-}
-
-func (self *FilteringMenuAction) setFilteringAuthor(author string) error {
-	self.c.Modes().Filtering.Reset()
-	self.c.Modes().Filtering.SetAuthor(author)
-	return self.setFiltering()
-}
-
-func (self *FilteringMenuAction) setFiltering() error {
-	self.c.Modes().Filtering.SetSelectedCommitHash(self.c.Contexts().LocalCommits.GetSelectedCommitHash())
-
-	repoState := self.c.State().GetRepoState()
-	if repoState.GetScreenMode() == types.SCREEN_NORMAL {
-		repoState.SetScreenMode(types.SCREEN_HALF)
-	}
-
-	if err := self.c.Context().Push(self.c.Contexts().LocalCommits); err != nil {
-		return err
-	}
-
-	return self.c.Refresh(types.RefreshOptions{Scope: []types.RefreshableView{types.COMMITS}, Then: func() error {
-		self.c.Contexts().LocalCommits.SetSelection(0)
-		self.c.Contexts().LocalCommits.FocusLine()
-		return nil
-	}})
 }

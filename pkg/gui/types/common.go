@@ -1,17 +1,16 @@
 package types
 
 import (
-	"github.com/jesseduffield/gocui"
 	"github.com/jesseduffield/lazygit/pkg/commands"
 	"github.com/jesseduffield/lazygit/pkg/commands/git_commands"
 	"github.com/jesseduffield/lazygit/pkg/commands/models"
 	"github.com/jesseduffield/lazygit/pkg/commands/oscommands"
-	"github.com/jesseduffield/lazygit/pkg/commands/types/enums"
 	"github.com/jesseduffield/lazygit/pkg/common"
 	"github.com/jesseduffield/lazygit/pkg/config"
+	"github.com/jesseduffield/lazygit/pkg/gocui"
+	"github.com/jesseduffield/lazygit/pkg/tasks"
 	"github.com/jesseduffield/lazygit/pkg/utils"
 	"github.com/sasha-s/go-deadlock"
-	"gopkg.in/ozeidan/fuzzy-patricia.v3/patricia"
 )
 
 type HelperCommon struct {
@@ -29,11 +28,32 @@ type IGuiCommon interface {
 	LogAction(action string)
 	LogCommand(cmdStr string, isCommandLine bool)
 	// we call this when we want to refetch some models and render the result. Internally calls PostRefreshUpdate
-	Refresh(RefreshOptions) error
+	Refresh(RefreshOptions)
+	// Like Refresh, but withholds keyboard input until the refreshed state is
+	// in place: keys pressed while the refresh is in flight are buffered and
+	// replayed once its model and view updates have run, instead of being
+	// handled against the stale, pre-refresh state. Use it when the very next
+	// keypress may depend on what the refresh produces — e.g. staging a hunk,
+	// where the refresh moves the selection to the next stageable hunk that
+	// the next press is meant to stage. Keep it to quick, narrow-scoped
+	// refreshes: one that includes COMMITS (or refreshes everything) can take
+	// very long in large repos and should usually not block input unless
+	// there's a very good reason (switching repos is one such example).
+	RefreshBlockingInput(RefreshOptions)
+	// Like Refresh, but for callers running on a worker goroutine (e.g. inside
+	// a WithWaitingStatus handler) rather than the UI thread. The refresh
+	// captures the model/context state it needs on the UI thread before doing
+	// its git work; knowing which thread the caller is on lets it capture
+	// inline (UI thread) or hop across (worker) without racing or deadlocking.
+	RefreshFromWorker(RefreshOptions)
 	// we call this when we've changed something in the view model but not the actual model,
 	// e.g. expanding or collapsing a folder in a file view. Calling 'Refresh' in this
-	// case would be overkill, although refresh will internally call 'PostRefreshUpdate'
-	PostRefreshUpdate(Context) error
+	// case would be overkill, although refresh will internally call 'PostRefreshUpdate'.
+	// It re-focuses the context's selection, which scrolls it into view.
+	PostRefreshUpdate(Context)
+	// Like PostRefreshUpdate, with control over scrolling and whether to update
+	// the main view.
+	PostRefreshUpdateWithOptions(Context, OnFocusOpts)
 
 	// renders string to a view without resetting its origin
 	SetViewContent(view *gocui.View, content string)
@@ -45,13 +65,27 @@ type IGuiCommon interface {
 	// allows rendering to main views (i.e. the ones to the right of the side panel)
 	// in such a way that avoids concurrency issues when there are slow commands
 	// to display the output of
-	RenderToMainViews(opts RefreshMainOpts) error
+	RenderToMainViews(opts RefreshMainOpts)
 	// used purely for the sake of RenderToMainViews to provide the pair of main views we want to render to
 	MainViewPairs() MainViewPairs
 
+	// return the view buffer manager for the given view, or nil if it doesn't have one
+	GetViewBufferManagerForView(view *gocui.View) *tasks.ViewBufferManager
+
+	// read enough lines into the given view's buffer to fill it at its current
+	// scroll position, plus some read-ahead for smooth scrolling
+	ReadLinesToFillView(view *gocui.View)
+
 	// returns true if command completed successfully
-	RunSubprocess(cmdObj oscommands.ICmdObj) (bool, error)
-	RunSubprocessAndRefresh(oscommands.ICmdObj) error
+	RunSubprocess(cmdObj *oscommands.CmdObj) (bool, error)
+	RunSubprocessAndRefresh(*oscommands.CmdObj) error
+
+	Suspend() error
+	Resume() error
+
+	// Pause or resume the background routines. Calls nest, so every pause must be balanced
+	// by a resume.
+	PauseBackgroundRefreshes(pause bool)
 
 	Context() IContextMgr
 	ContextForKey(key ContextKey) Context
@@ -65,9 +99,22 @@ type IGuiCommon interface {
 	// Only necessary to call if you're not already on the UI thread i.e. you're inside a goroutine.
 	// All controller handlers are executed on the UI thread.
 	OnUIThread(f func() error)
+	// Like OnUIThread, but for work triggered by a background routine, so it
+	// doesn't count towards lazygit being busy (see the *Background methods on
+	// gocui.Gui and repo-switch safety).
+	OnUIThreadBackground(f func() error)
+	// Like OnUIThread, but signals that the callback only modifies view
+	// content (e.g. spinner), allows the event loop to skip
+	// the expensive layout recalculation when only content changed.
+	OnUIThreadContentOnly(f func() error)
+	// Like OnUIThreadContentOnly, but for background work (see OnUIThreadBackground).
+	OnUIThreadContentOnlyBackground(f func() error)
 	// Runs a function in a goroutine. Use this whenever you want to run a goroutine and keep track of the fact
 	// that lazygit is still busy. See docs/dev/Busy.md
 	OnWorker(f func(gocui.Task) error)
+	// Like OnWorker, but for a background routine (or work it triggers), so it
+	// doesn't count towards lazygit being busy (see OnUIThreadBackground).
+	OnWorkerBackground(f func(gocui.Task) error)
 	// Function to call at the end of our 'layout' function which renders views
 	// For example, you may want a view's line to be focused only after that view is
 	// resized, if in accordion mode.
@@ -91,12 +138,14 @@ type IGuiCommon interface {
 
 	Modes() *Modes
 
-	Mutexes() Mutexes
+	Mutexes() *Mutexes
 
 	State() IStateAccessor
 
 	KeybindingsOpts() KeybindingsOpts
 	CallKeybindingHandler(binding *Binding) error
+
+	ResetKeybindings()
 
 	// hopefully we can remove this once we've moved all our keybinding stuff out of the gui god struct.
 	GetInitialKeybindingsWithCustomCommands() ([]*Binding, []*gocui.ViewMouseBinding)
@@ -118,18 +167,34 @@ type IPopupHandler interface {
 	// Shows a notification popup with the given title and message to the user.
 	//
 	// This is a convenience wrapper around Confirm(), thus the popup can be closed using both 'Enter' and 'ESC'.
-	Alert(title string, message string) error
+	Alert(title string, message string)
 	// Shows a popup asking the user for confirmation.
-	Confirm(opts ConfirmOpts) error
+	Confirm(opts ConfirmOpts)
+	// Shows a popup asking the user for confirmation if condition is true; otherwise, the HandleConfirm function is called directly.
+	ConfirmIf(condition bool, opts ConfirmOpts) error
 	// Shows a popup prompting the user for input.
-	Prompt(opts PromptOpts) error
+	Prompt(opts PromptOpts)
 	WithWaitingStatus(message string, f func(gocui.Task) error) error
-	WithWaitingStatusSync(message string, f func() error) error
+	WithWaitingStatusBlockingInput(opts WaitingStatusOpts, f func(gocui.Task) error) error
 	Menu(opts CreateMenuOptions) error
 	Toast(message string)
 	ErrorToast(message string)
 	SetToastFunc(func(string, ToastKind))
 	GetPromptInput() string
+}
+
+type WaitingStatusOpts struct {
+	// The message shown alongside the spinner while the operation runs.
+	Message string
+
+	// When set, the working tree state mode (the yellow
+	// "Rebasing"/"Merging"/"Cherry-picking"/"Reverting" indicator, along with
+	// its abort button) stays hidden until the operation is done. Set it for
+	// operations that drive such a state themselves: the state they leave on
+	// disk while they run is transient, so surfacing it would flash the
+	// indicator on and offer to abort a sequence that lazygit is in the middle
+	// of running.
+	HideWorkingTreeState bool
 }
 
 type ToastKind int
@@ -140,11 +205,19 @@ const (
 )
 
 type CreateMenuOptions struct {
-	Title           string
-	Prompt          string // a message that will be displayed above the menu options
-	Items           []*MenuItem
-	HideCancel      bool
-	ColumnAlignment []utils.Alignment
+	Title                      string
+	Prompt                     string // a message that will be displayed above the menu options
+	Items                      []*MenuItem
+	HideCancel                 bool
+	OnCancel                   func() error // called when the menu is dismissed without selecting an item
+	ColumnAlignment            []utils.Alignment
+	AllowFilteringKeybindings  bool
+	KeepConflictingKeybindings bool // if true, the keybindings that match essential bindings such as confirm or return will not be removed from menu items
+	// if true, the menu has a filter row of its own and filters its items as the
+	// user types, instead of being filtered through the search prompt. Only for
+	// menus whose items don't have keybindings of their own, because those keys
+	// would clash with typing.
+	FilterAsYouType bool
 }
 
 type CreatePopupPanelOpts struct {
@@ -160,6 +233,8 @@ type CreatePopupPanelOpts struct {
 	FindSuggestionsFunc func(string) []*Suggestion
 	Mask                bool
 	AllowEditSuggestion bool
+	AllowEmptyInput     bool
+	PreserveWhitespace  bool
 }
 
 type ConfirmOpts struct {
@@ -178,6 +253,8 @@ type PromptOpts struct {
 	FindSuggestionsFunc func(string) []*Suggestion
 	HandleConfirm       func(string) error
 	AllowEditSuggestion bool
+	AllowEmptyInput     bool
+	PreserveWhitespace  bool
 	// CAPTURE THIS
 	HandleClose            func() error
 	HandleDeleteSuggestion func(int) error
@@ -197,6 +274,10 @@ type DisabledReason struct {
 	// error panel instead. This is useful if the text is very long, or if it is
 	// important enough to show it more prominently, or both.
 	ShowErrorInPanel bool
+
+	// If true, the keybinding dispatch mechanism will continue to look for
+	// other handlers for the keypress.
+	AllowFurtherDispatching bool
 }
 
 type MenuWidget int
@@ -229,14 +310,21 @@ type MenuItem struct {
 	// alternative to Label. Allows specifying columns which will be auto-aligned
 	LabelColumns []string
 
+	// The strings that filtering the menu matches against, for menus that
+	// abbreviate their columns to keep them narrow. If nil, LabelColumns are
+	// matched, so that a menu only needs to set this if what it displays is not
+	// the full text.
+	FilterColumns []string
+
 	OnPress func() error
 
 	// Only applies when Label is used
 	OpensMenu bool
 
-	// If Key is defined it allows the user to press the key to invoke the menu
-	// item, as opposed to having to navigate to it
-	Key Key
+	// If Keys is non-empty, the user can press any of these keys to invoke the
+	// menu item, as opposed to having to navigate to it. Only the first key is
+	// shown in the menu; the alternates are matched silently.
+	Keys []gocui.Key
 
 	// A widget to show in front of the menu item. Supported widget types are
 	// checkboxes and radio buttons,
@@ -267,26 +355,30 @@ func (self *MenuItem) ID() string {
 }
 
 type Model struct {
-	CommitFiles  []*models.CommitFile
-	Files        []*models.File
-	Submodules   []*models.SubmoduleConfig
-	Branches     []*models.Branch
-	Commits      []*models.Commit
-	StashEntries []*models.StashEntry
-	SubCommits   []*models.Commit
-	Remotes      []*models.Remote
-	Worktrees    []*models.Worktree
+	CommitFiles     []*models.CommitFile
+	Files           []*models.File
+	Submodules      []*models.SubmoduleConfig
+	Branches        []*models.Branch
+	Commits         []*models.Commit
+	StashEntries    []*models.StashEntry
+	SubCommits      []*models.Commit
+	Remotes         []*models.Remote
+	Worktrees       []*models.Worktree
+	PullRequests    []*models.GithubPullRequest
+	PullRequestsMap map[string]*models.GithubPullRequest
 
 	// FilteredReflogCommits are the ones that appear in the reflog panel.
-	// when in filtering mode we only include the ones that match the given path
+	// When in filtering mode we only include the ones that match the given path
 	FilteredReflogCommits []*models.Commit
-	// ReflogCommits are the ones used by the branches panel to obtain recency values
-	// if we're not in filtering mode, CommitFiles and FilteredReflogCommits will be
+	// ReflogCommits are the ones used by the branches panel to obtain recency values,
+	// and for the undo functionality.
+	// If we're not in filtering mode, CommitFiles and FilteredReflogCommits will be
 	// one and the same
 	ReflogCommits []*models.Commit
 
 	BisectInfo                          *git_commands.BisectInfo
-	WorkingTreeStateAtLastCommitRefresh enums.RebaseMode
+	WorkingTreeStateAtLastCommitRefresh models.WorkingTreeState
+	CommitsWereFilteredAtLastRefresh    bool
 	RemoteBranches                      []*models.RemoteBranch
 	Tags                                []*models.Tag
 
@@ -296,24 +388,14 @@ type Model struct {
 
 	MainBranches *git_commands.MainBranches
 
-	// for displaying suggestions while typing in a file name
-	FilesTrie *patricia.Trie
-
 	Authors map[string]*models.Author
+
+	HashPool *utils.StringPool
 }
 
-// if you add a new mutex here be sure to instantiate it. We're using pointers to
-// mutexes so that we can pass the mutexes to controllers.
 type Mutexes struct {
-	RefreshingFilesMutex    *deadlock.Mutex
-	RefreshingBranchesMutex *deadlock.Mutex
-	RefreshingStatusMutex   *deadlock.Mutex
-	LocalCommitsMutex       *deadlock.Mutex
-	SubCommitsMutex         *deadlock.Mutex
-	AuthorsMutex            *deadlock.Mutex
-	SubprocessMutex         *deadlock.Mutex
-	PopupMutex              *deadlock.Mutex
-	PtyMutex                *deadlock.Mutex
+	SubprocessMutex deadlock.Mutex
+	PtyMutex        deadlock.Mutex
 }
 
 // A long-running operation associated with an item. For example, we'll show
@@ -336,14 +418,22 @@ type HasUrn interface {
 	URN() string
 }
 
+// RepoLocation is everything it takes to open a repo again: the directory to
+// change to, plus the environment telling git where the repo is for the repos
+// git can't find from that directory (see RepoPaths.GitLocationEnvVars), which
+// is empty for all the others.
+type RepoLocation struct {
+	Path               string
+	GitLocationEnvVars []string
+}
+
 type IStateAccessor interface {
-	GetRepoPathStack() *utils.StringStack
+	GetRepoPathStack() *utils.Stack[RepoLocation]
 	GetRepoState() IRepoStateAccessor
+	GetDiffRendererConfigManager() *config.DiffRendererConfigManager
 	// tells us whether we're currently updating lazygit
 	GetUpdating() bool
 	SetUpdating(bool)
-	SetIsRefreshingFiles(bool)
-	GetIsRefreshingFiles() bool
 	GetShowExtrasWindow() bool
 	SetShowExtrasWindow(bool)
 	GetRetainOriginalDir() bool
@@ -351,6 +441,13 @@ type IStateAccessor interface {
 	GetItemOperation(item HasUrn) ItemOperation
 	SetItemOperation(item HasUrn, operation ItemOperation)
 	ClearItemOperation(item HasUrn)
+
+	// A counter that is bumped every time we switch to a different repository
+	// (see Gui.resetState). A refresh captures it when it starts and carries it
+	// through to onUIThreadUnlessRepoChanged, so that a model update computed for
+	// one repo can be dropped rather than applied to another if the user switched
+	// repos while the refresh was in flight.
+	GetRepoGeneration() int
 }
 
 type IRepoStateAccessor interface {
@@ -360,12 +457,14 @@ type IRepoStateAccessor interface {
 	SetStartupStage(stage StartupStage)
 	GetCurrentPopupOpts() *CreatePopupPanelOpts
 	SetCurrentPopupOpts(*CreatePopupPanelOpts)
-	GetScreenMode() WindowMaximisation
-	SetScreenMode(WindowMaximisation)
+	GetScreenMode() ScreenMode
+	SetScreenMode(ScreenMode)
 	InSearchPrompt() bool
 	GetSearchState() *SearchState
 	SetSplitMainPanel(bool)
 	GetSplitMainPanel() bool
+	GetMergeOrRebaseStartedInLazygit() bool
+	SetMergeOrRebaseStartedInLazygit(bool)
 }
 
 // startup stages so we don't need to load everything at once
@@ -380,10 +479,10 @@ const (
 // as in panel, not your terminal's window). Sometimes you want a bit more space
 // to see the contents of a panel, and this keeps track of how much maximisation
 // you've set
-type WindowMaximisation int
+type ScreenMode int
 
 const (
-	SCREEN_NORMAL WindowMaximisation = iota
+	SCREEN_NORMAL ScreenMode = iota
 	SCREEN_HALF
 	SCREEN_FULL
 )

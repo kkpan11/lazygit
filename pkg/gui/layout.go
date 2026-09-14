@@ -1,11 +1,12 @@
 package gui
 
 import (
-	"github.com/jesseduffield/gocui"
-	"github.com/jesseduffield/lazygit/pkg/gui/context"
+	"errors"
+
+	"github.com/jesseduffield/lazygit/pkg/gocui"
 	"github.com/jesseduffield/lazygit/pkg/gui/types"
+	"github.com/jesseduffield/lazygit/pkg/utils"
 	"github.com/samber/lo"
-	"golang.org/x/exp/slices"
 )
 
 // layout is called for every screen re-render e.g. when the screen is resized
@@ -23,22 +24,31 @@ func (gui *Gui) layout(g *gocui.Gui) error {
 
 	informationStr := gui.informationStr()
 
-	appStatus := gui.helpers.AppStatus.GetStatusString()
+	var appStatus string
+	appStatusView, err := g.View("appStatus")
+	if err == nil {
+		appStatus = utils.Decolorise(appStatusView.Buffer())
+	}
 
 	viewDimensions := gui.getWindowDimensions(informationStr, appStatus)
 
 	// reading more lines into main view buffers upon resize
 	prevMainView := gui.Views.Main
 	if prevMainView != nil {
-		_, prevMainHeight := prevMainView.Size()
-		newMainHeight := viewDimensions["main"].Y1 - viewDimensions["main"].Y0 - 1
-		heightDiff := newMainHeight - prevMainHeight
-		if heightDiff > 0 {
-			if manager, ok := gui.viewBufferManagerMap["main"]; ok {
-				manager.ReadLines(heightDiff)
+		prevMainHeight := prevMainView.Height()
+		newMainHeight := viewDimensions["main"].Y1 - viewDimensions["main"].Y0 + 1
+		if newMainHeight > prevMainHeight {
+			// The main views have grown taller, so make sure enough lines are
+			// loaded to fill them. The views haven't been resized yet at this
+			// point, so we can't rely on their current height; compute the target
+			// total from the new height instead. (Reading past the actual content
+			// is harmless: ReadLines stops at the end of input.)
+			linesToRead := prevMainView.OriginY() + newMainHeight
+			if manager := gui.getViewBufferManagerForView(gui.Views.Main); manager != nil {
+				manager.ReadLines(linesToRead)
 			}
-			if manager, ok := gui.viewBufferManagerMap["secondary"]; ok {
-				manager.ReadLines(heightDiff)
+			if manager := gui.getViewBufferManagerForView(gui.Views.Secondary); manager != nil {
+				manager.ReadLines(linesToRead)
 			}
 		}
 	}
@@ -78,7 +88,13 @@ func (gui *Gui) layout(g *gocui.Gui) error {
 		if !view.CanScrollPastBottom {
 			maxOriginY -= newHeight - 1
 		}
-		if oldOriginY := view.OriginY(); oldOriginY > maxOriginY {
+		// Don't scroll up while the view's content is still being loaded: its
+		// height only reflects what has been read so far, so clamping to it now
+		// would yank the view to the top even though more content is on the way
+		// (e.g. when re-rendering a diff the user was scrolled into).
+		manager := gui.getViewBufferManagerForView(view)
+		stillLoading := manager != nil && manager.IsLoading()
+		if oldOriginY := view.OriginY(); oldOriginY > maxOriginY && !stillLoading {
 			view.ScrollUp(oldOriginY - maxOriginY)
 			// the view might not have scrolled actually (if it was at the limit
 			// already), so we need to check if it did
@@ -87,17 +103,15 @@ func (gui *Gui) layout(g *gocui.Gui) error {
 			}
 		}
 		if context.NeedsRerenderOnWidthChange() == types.NEEDS_RERENDER_ON_WIDTH_CHANGE_WHEN_WIDTH_CHANGES {
-			// view.Width() returns the width -1 for some reason
-			oldWidth := view.Width() + 1
-			newWidth := dimensionsObj.X1 - dimensionsObj.X0 + 2*frameOffset
+			oldWidth := view.Width()
+			newWidth := dimensionsObj.X1 - dimensionsObj.X0 + 1
 			if oldWidth != newWidth {
 				mustRerender = true
 			}
 		}
 		if context.NeedsRerenderOnHeightChange() {
-			// view.Height() returns the height -1 for some reason
-			oldHeight := view.Height() + 1
-			newHeight := dimensionsObj.Y1 - dimensionsObj.Y0 + 2*frameOffset
+			oldHeight := view.Height()
+			newHeight := dimensionsObj.Y1 - dimensionsObj.Y0 + 1
 			if oldHeight != newHeight {
 				mustRerender = true
 			}
@@ -125,23 +139,45 @@ func (gui *Gui) layout(g *gocui.Gui) error {
 		}
 
 		_, err := setViewFromDimensions(context)
-		if err != nil && !gocui.IsUnknownView(err) {
+		if err != nil && !errors.Is(err, gocui.ErrUnknownView) {
 			return err
 		}
 	}
 
-	minimumHeight := 9
+	menuWithFilterRowVisible := gui.Views.Menu.Visible && gui.State.Contexts.Menu.FilterAsYouType()
+	minimumHeight := minimumScreenHeight(len(gui.helpers.Window.SideWindows()), menuWithFilterRowVisible)
 	minimumWidth := 10
 	gui.Views.Limit.Visible = height < minimumHeight || width < minimumWidth
 
+	filterRowVisible := gui.Views.Menu.Visible && gui.State.Contexts.Menu.FilterStarted()
+	gui.Views.MenuFilterFrame.Visible = filterRowVisible
+	gui.Views.MenuFilter.Visible = filterRowVisible
+	if gui.Views.Menu.Visible {
+		// Until the user types something there is no filter row to advertise the
+		// filter, so the menu says that typing is a thing.
+		gui.Views.Menu.Subtitle = lo.Ternary(menuWithFilterRowVisible && !filterRowVisible, gui.c.Tr.MenuFilterHint, "")
+	}
+	if menuWithFilterRowVisible {
+		// The filter input is the current view for as long as such a menu is open,
+		// so without this the cursor would sit on the menu's bottom border, where
+		// the filter row is yet to appear.
+		gui.g.Cursor = filterRowVisible
+	}
 	gui.Views.Tooltip.Visible = gui.Views.Menu.Visible && gui.Views.Tooltip.Buffer() != ""
 
 	for _, context := range gui.transientContexts() {
 		view, err := gui.g.View(context.GetViewName())
-		if err != nil && !gocui.IsUnknownView(err) {
+		if err != nil && !errors.Is(err, gocui.ErrUnknownView) {
 			return err
 		}
-		view.Visible = gui.helpers.Window.GetViewNameForWindow(context.GetWindowName()) == context.GetViewName()
+		// A transient view is visible if it is the view its window is currently
+		// showing — but only if that window is part of the layout at all. For a
+		// window without dimensions, setViewFromDimensions parks the view at full
+		// screen size in the background, so making it visible would cover all
+		// windows below it.
+		_, windowHasDimensions := viewDimensions[context.GetWindowName()]
+		view.Visible = windowHasDimensions &&
+			gui.helpers.Window.GetViewNameForWindow(context.GetWindowName()) == context.GetViewName()
 	}
 
 	if gui.PrevLayout.Information != informationStr {
@@ -177,9 +213,7 @@ func (gui *Gui) layout(g *gocui.Gui) error {
 	}
 
 	for _, context := range contextsToRerender {
-		if err := context.HandleRender(); err != nil {
-			return err
-		}
+		context.HandleRender()
 	}
 
 	// here is a good place log some stuff
@@ -205,6 +239,26 @@ outer:
 	return nil
 }
 
+// The height below which we show the "not enough space" view instead of the
+// layout.
+func minimumScreenHeight(sideWindowCount int, menuWithFilterRowVisible bool) int {
+	// When the screen is too short the side panels are squashed, with the
+	// unfocused ones taking one row each and the focused one taking the rest. The
+	// more panels there are, the more rows the unfocused ones reserve, so the
+	// floor below which there's no room left for the focused panel grows with the
+	// panel count. Keep the historical floor of 9 for the default five panels.
+	minimumHeight := max(9, sideWindowCount+4)
+
+	// A menu popup gets three quarters of the screen, of which its frame, the
+	// tooltip gap below it and a reserved filter row take seven rows, so below 11
+	// rows there is no room left for even one menu item.
+	if menuWithFilterRowVisible {
+		minimumHeight = max(minimumHeight, 11)
+	}
+
+	return minimumHeight
+}
+
 func (gui *Gui) prepareView(viewName string) (*gocui.View, error) {
 	// arbitrarily giving the view enough size so that we don't get an error, but
 	// it's expected that the view will be given the correct size before being shown
@@ -225,9 +279,7 @@ func (gui *Gui) onInitialViewsCreationForRepo() error {
 	}
 
 	initialContext := gui.c.Context().Current()
-	if err := gui.c.Context().Activate(initialContext, types.OnFocusOpts{}); err != nil {
-		return err
-	}
+	gui.c.Context().Activate(initialContext, types.OnFocusOpts{})
 
 	return gui.loadNewRepo()
 }
@@ -250,24 +302,9 @@ func (gui *Gui) onRepoViewReset() error {
 		}
 	}
 
-	gui.g.Mutexes.ViewsMutex.Lock()
-	// add tabs to views
-	for _, view := range gui.g.Views() {
-		// if the view is in our mapping, we'll set the tabs and the tab index
-		for _, values := range gui.viewTabMap() {
-			index := slices.IndexFunc(values, func(tabContext context.TabView) bool {
-				return tabContext.ViewName == view.Name()
-			})
-
-			if index != -1 {
-				view.Tabs = lo.Map(values, func(tabContext context.TabView, _ int) string {
-					return tabContext.Tab
-				})
-				view.TabIndex = index
-			}
-		}
-	}
-	gui.g.Mutexes.ViewsMutex.Unlock()
+	// The loop above orders views by a fixed list, which doesn't necessarily put
+	// each panel's first configured tab on top.
+	gui.moveDefaultTabsToTop()
 
 	return nil
 }

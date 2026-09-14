@@ -15,6 +15,8 @@ var ResolveExternally = NewIntegrationTest(NewIntegrationTestArgs{
 		shared.CreateMergeConflictFile(shell)
 	},
 	Run: func(t *TestDriver, keys config.KeybindingConfig) {
+		t.Common().PretendMergeOrRebaseStartedInLazygit()
+
 		t.Views().Files().
 			IsFocused().
 			Lines(
@@ -25,7 +27,7 @@ var ResolveExternally = NewIntegrationTest(NewIntegrationTestArgs{
 			}).
 			Press(keys.Universal.Refresh)
 
-		t.Common().ContinueOnConflictsResolved()
+		t.Common().ContinueOnConflictsResolved("merge")
 
 		t.Views().Files().
 			IsEmpty()

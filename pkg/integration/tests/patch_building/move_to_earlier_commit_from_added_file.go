@@ -71,15 +71,16 @@ var MoveToEarlierCommitFromAddedFile = NewIntegrationTest(NewIntegrationTestArgs
 			SelectNextItem().
 			PressPrimaryAction() // choose the version with all three lines
 
-		t.Common().ContinueOnConflictsResolved()
+		t.Common().ContinueOnConflictsResolved("rebase")
 
 		t.Views().Commits().
 			Focus().
 			Lines(
-				Contains("commit to move from"),
-				Contains("destination commit").IsSelected(),
+				Contains("commit to move from").IsSelected(),
+				Contains("destination commit"),
 				Contains("first commit"),
 			).
+			NavigateToLine(Contains("destination commit")).
 			PressEnter()
 
 		t.Views().CommitFiles().

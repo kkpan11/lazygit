@@ -1,19 +1,16 @@
 package controllers
 
 import (
-	"errors"
 	"fmt"
 	"strings"
 	"time"
 
-	"github.com/jesseduffield/gocui"
-	"github.com/jesseduffield/lazygit/pkg/commands/types/enums"
 	"github.com/jesseduffield/lazygit/pkg/constants"
+	"github.com/jesseduffield/lazygit/pkg/gocui"
 	"github.com/jesseduffield/lazygit/pkg/gui/presentation"
 	"github.com/jesseduffield/lazygit/pkg/gui/style"
 	"github.com/jesseduffield/lazygit/pkg/gui/types"
 	"github.com/jesseduffield/lazygit/pkg/utils"
-	"github.com/samber/lo"
 )
 
 type StatusController struct {
@@ -35,34 +32,33 @@ func NewStatusController(
 func (self *StatusController) GetKeybindings(opts types.KeybindingsOpts) []*types.Binding {
 	bindings := []*types.Binding{
 		{
-			Key:         opts.GetKey(opts.Config.Universal.OpenFile),
-			Handler:     self.openConfig,
-			Description: self.c.Tr.OpenConfig,
-			Tooltip:     self.c.Tr.OpenFileTooltip,
-		},
-		{
-			Key:             opts.GetKey(opts.Config.Universal.Edit),
+			Keys:            opts.GetKeys(opts.Config.Universal.Edit),
 			Handler:         self.editConfig,
 			Description:     self.c.Tr.EditConfig,
 			Tooltip:         self.c.Tr.EditFileTooltip,
 			DisplayOnScreen: true,
 		},
 		{
-			Key:             opts.GetKey(opts.Config.Status.CheckForUpdate),
+			Keys:            opts.GetKeys(opts.Config.Status.CheckForUpdate),
 			Handler:         self.handleCheckForUpdate,
 			Description:     self.c.Tr.CheckForUpdate,
 			DisplayOnScreen: true,
 		},
 		{
-			Key:             opts.GetKey(opts.Config.Status.RecentRepos),
+			Keys:            opts.GetKeys(opts.Config.Status.RecentRepos),
 			Handler:         self.c.Helpers().Repos.CreateRecentReposMenu,
 			Description:     self.c.Tr.SwitchRepo,
 			DisplayOnScreen: true,
 		},
 		{
-			Key:         opts.GetKey(opts.Config.Status.AllBranchesLogGraph),
-			Handler:     self.showAllBranchLogs,
+			Keys:        opts.GetKeys(opts.Config.Status.AllBranchesLogGraph),
+			Handler:     func() error { self.switchToOrRotateAllBranchesLogs(); return nil },
 			Description: self.c.Tr.AllBranchesLogGraph,
+		},
+		{
+			Keys:        opts.GetKeys(opts.Config.Status.AllBranchesLogGraphReverse),
+			Handler:     func() error { self.switchToOrRotateAllBranchesLogsBackward(); return nil },
+			Description: self.c.Tr.AllBranchesLogGraphReverse,
 		},
 	}
 
@@ -79,15 +75,15 @@ func (self *StatusController) GetMouseKeybindings(opts types.KeybindingsOpts) []
 	}
 }
 
-func (self *StatusController) GetOnRenderToMain() func() error {
-	return func() error {
+func (self *StatusController) GetOnRenderToMain() func() {
+	return func() {
 		switch self.c.UserConfig().Gui.StatusPanelView {
 		case "dashboard":
-			return self.showDashboard()
+			self.showDashboard()
 		case "allBranchesLog":
-			return self.showAllBranchLogs()
+			self.showAllBranchLogs()
 		default:
-			return self.showDashboard()
+			self.showDashboard()
 		}
 	}
 }
@@ -104,26 +100,21 @@ func (self *StatusController) onClick(opts gocui.ViewMouseBindingOpts) error {
 		return nil
 	}
 
-	if err := self.c.Context().Push(self.Context()); err != nil {
-		return err
-	}
+	self.c.Context().Push(self.Context(), types.OnFocusOpts{})
 
 	upstreamStatus := utils.Decolorise(presentation.BranchStatus(currentBranch, types.ItemOperationNone, self.c.Tr, time.Now(), self.c.UserConfig()))
 	repoName := self.c.Git().RepoPaths.RepoName()
 	workingTreeState := self.c.Git().Status.WorkingTreeState()
-	switch workingTreeState {
-	case enums.REBASE_MODE_REBASING, enums.REBASE_MODE_MERGING:
-		workingTreeStatus := fmt.Sprintf("(%s)", presentation.FormatWorkingTreeStateLower(self.c.Tr, workingTreeState))
+	if workingTreeState.Any() {
+		workingTreeStatus := fmt.Sprintf("(%s)", workingTreeState.LowerCaseTitle(self.c.Tr))
 		if cursorInSubstring(opts.X, upstreamStatus+" ", workingTreeStatus) {
 			return self.c.Helpers().MergeAndRebase.CreateRebaseOptionsMenu()
 		}
 		if cursorInSubstring(opts.X, upstreamStatus+" "+workingTreeStatus+" ", repoName) {
 			return self.c.Helpers().Repos.CreateRecentReposMenu()
 		}
-	default:
-		if cursorInSubstring(opts.X, upstreamStatus+" ", repoName) {
-			return self.c.Helpers().Repos.CreateRecentReposMenu()
-		}
+	} else if cursorInSubstring(opts.X, upstreamStatus+" ", repoName) {
+		return self.c.Helpers().Repos.CreateRecentReposMenu()
 	}
 
 	return nil
@@ -149,54 +140,52 @@ func lazygitTitle() string {
                |___/ |___/       `
 }
 
-func (self *StatusController) askForConfigFile(action func(file string) error) error {
-	confPaths := self.c.GetConfig().GetUserConfigPaths()
-	switch len(confPaths) {
-	case 0:
-		return errors.New(self.c.Tr.NoConfigFileFoundErr)
-	case 1:
-		return action(confPaths[0])
-	default:
-		menuItems := lo.Map(confPaths, func(path string, _ int) *types.MenuItem {
-			return &types.MenuItem{
-				Label: path,
-				OnPress: func() error {
-					return action(path)
-				},
-			}
-		})
-
-		return self.c.Menu(types.CreateMenuOptions{
-			Title: self.c.Tr.SelectConfigFile,
-			Items: menuItems,
-		})
-	}
-}
-
-func (self *StatusController) openConfig() error {
-	return self.askForConfigFile(self.c.Helpers().Files.OpenFile)
-}
-
 func (self *StatusController) editConfig() error {
-	return self.askForConfigFile(func(file string) error {
-		return self.c.Helpers().Files.EditFiles([]string{file})
-	})
+	return (&EditConfigAction{c: self.c}).Call()
 }
 
-func (self *StatusController) showAllBranchLogs() error {
+func (self *StatusController) showAllBranchLogs() {
 	cmdObj := self.c.Git().Branch.AllBranchesLogCmdObj()
 	task := types.NewRunPtyTask(cmdObj.GetCmd())
 
-	return self.c.RenderToMainViews(types.RefreshMainOpts{
+	title := self.c.Tr.LogTitle
+	if i, n := self.c.Git().Branch.GetAllBranchesLogIdxAndCount(); n > 1 {
+		title = fmt.Sprintf(self.c.Tr.LogXOfYTitle, i+1, n)
+	}
+	self.c.RenderToMainViews(types.RefreshMainOpts{
 		Pair: self.c.MainViewPairs().Normal,
 		Main: &types.ViewUpdateOpts{
-			Title: self.c.Tr.LogTitle,
+			Title: title,
 			Task:  task,
 		},
 	})
 }
 
-func (self *StatusController) showDashboard() error {
+// Switches to the all branches view, or, if already on that view,
+// rotates to the next command in the list, and then renders it.
+func (self *StatusController) switchToOrRotateAllBranchesLogs() {
+	// A bit of a hack to ensure we only rotate to the next branch log command
+	// if we currently are looking at a branch log. Otherwise, we should just show
+	// the current index (if we are coming from the dashboard).
+	if self.c.Views().Main.Title != self.c.Tr.StatusTitle {
+		self.c.Git().Branch.RotateAllBranchesLogIdx()
+	}
+	self.showAllBranchLogs()
+}
+
+// Switches to the all branches view, or, if already on that view,
+// rotates to the previous command in the list, and then renders it.
+func (self *StatusController) switchToOrRotateAllBranchesLogsBackward() {
+	// A bit of a hack to ensure we only rotate to the previous branch log command
+	// if we currently are looking at a branch log. Otherwise, we should just show
+	// the current index (if we are coming from the dashboard).
+	if self.c.Views().Main.Title != self.c.Tr.StatusTitle {
+		self.c.Git().Branch.RotateAllBranchesLogIdxBackward()
+	}
+	self.showAllBranchLogs()
+}
+
+func (self *StatusController) showDashboard() {
 	versionStr := "master"
 	version, err := types.ParseVersionNumber(self.c.GetConfig().GetVersion())
 	if err == nil {
@@ -210,15 +199,15 @@ func (self *StatusController) showDashboard() error {
 		[]string{
 			lazygitTitle(),
 			fmt.Sprintf("Copyright %d Jesse Duffield", time.Now().Year()),
-			fmt.Sprintf("Keybindings: %s", style.PrintSimpleHyperlink(fmt.Sprintf(constants.Links.Docs.Keybindings, versionStr))),
-			fmt.Sprintf("Config Options: %s", style.PrintSimpleHyperlink(fmt.Sprintf(constants.Links.Docs.Config, versionStr))),
-			fmt.Sprintf("Tutorial: %s", style.PrintSimpleHyperlink(constants.Links.Docs.Tutorial)),
-			fmt.Sprintf("Raise an Issue: %s", style.PrintSimpleHyperlink(constants.Links.Issues)),
-			fmt.Sprintf("Release Notes: %s", style.PrintSimpleHyperlink(constants.Links.Releases)),
-			style.FgMagenta.Sprintf("Become a sponsor: %s", style.PrintSimpleHyperlink(constants.Links.Donate)), // caffeine ain't free
+			fmt.Sprintf("Keybindings: %s", fmt.Sprintf(constants.Links.Docs.Keybindings, versionStr)),
+			fmt.Sprintf("Config Options: %s", fmt.Sprintf(constants.Links.Docs.Config, versionStr)),
+			fmt.Sprintf("Tutorial: %s", constants.Links.Docs.Tutorial),
+			fmt.Sprintf("Raise an Issue: %s", constants.Links.Issues),
+			fmt.Sprintf("Release Notes: %s", constants.Links.Releases),
+			style.FgMagenta.Sprintf("Become a sponsor: %s", constants.Links.Donate), // caffeine ain't free
 		}, "\n\n") + "\n"
 
-	return self.c.RenderToMainViews(types.RefreshMainOpts{
+	self.c.RenderToMainViews(types.RefreshMainOpts{
 		Pair: self.c.MainViewPairs().Normal,
 		Main: &types.ViewUpdateOpts{
 			Title: self.c.Tr.StatusTitle,

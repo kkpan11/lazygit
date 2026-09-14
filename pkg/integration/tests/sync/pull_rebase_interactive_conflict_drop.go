@@ -49,16 +49,21 @@ var PullRebaseInteractiveConflictDrop = NewIntegrationTest(NewIntegrationTestArg
 		t.Views().Commits().
 			Focus().
 			Lines(
-				Contains("pick").Contains("five").IsSelected(),
-				Contains("conflict").Contains("YOU ARE HERE").Contains("four"),
+				Contains("─── Pending rebase todos"),
+				Contains("pick").Contains("five"),
+				Contains("pick").Contains("CONFLICT").Contains("four").IsSelected(),
+				Contains("─── Commits"),
 				Contains("three"),
 				Contains("two"),
 				Contains("one"),
 			).
+			NavigateToLine(Contains("five")).
 			Press(keys.Universal.Remove).
 			Lines(
+				Contains("─── Pending rebase todos"),
 				Contains("drop").Contains("five").IsSelected(),
-				Contains("conflict").Contains("YOU ARE HERE").Contains("four"),
+				Contains("pick").Contains("CONFLICT").Contains("four"),
+				Contains("─── Commits"),
 				Contains("three"),
 				Contains("two"),
 				Contains("one"),
@@ -83,7 +88,7 @@ var PullRebaseInteractiveConflictDrop = NewIntegrationTest(NewIntegrationTestArg
 			SelectNextItem().
 			PressPrimaryAction() // choose 'content4'
 
-		t.Common().ContinueOnConflictsResolved()
+		t.Common().ContinueOnConflictsResolved("rebase")
 
 		t.Views().Status().Content(Equals("↑1 repo → master"))
 

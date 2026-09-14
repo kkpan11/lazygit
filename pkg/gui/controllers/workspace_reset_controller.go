@@ -8,7 +8,8 @@ import (
 	"math/rand"
 	"time"
 
-	"github.com/jesseduffield/gocui"
+	"github.com/jesseduffield/lazygit/pkg/gocui"
+	"github.com/jesseduffield/lazygit/pkg/gui/controllers/helpers"
 	"github.com/jesseduffield/lazygit/pkg/gui/style"
 	"github.com/jesseduffield/lazygit/pkg/gui/types"
 )
@@ -30,20 +31,29 @@ func (self *FilesController) createResetMenu() error {
 				red.Sprint(nukeStr),
 			},
 			OnPress: func() error {
-				self.c.LogAction(self.c.Tr.Actions.NukeWorkingTree)
-				if err := self.c.Git().WorkingTree.ResetAndClean(); err != nil {
-					return err
-				}
+				self.c.Confirm(
+					types.ConfirmOpts{
+						Title:  self.c.Tr.Actions.NukeWorkingTree,
+						Prompt: self.c.Tr.NukeTreeConfirmation,
+						HandleConfirm: func() error {
+							self.c.LogAction(self.c.Tr.Actions.NukeWorkingTree)
+							if err := self.c.Git().WorkingTree.ResetAndClean(); err != nil {
+								return err
+							}
 
-				if self.c.UserConfig().Gui.AnimateExplosion {
-					self.animateExplosion()
-				}
+							if self.c.UserConfig().Gui.AnimateExplosion {
+								self.animateExplosion()
+							}
 
-				return self.c.Refresh(
-					types.RefreshOptions{Mode: types.ASYNC, Scope: []types.RefreshableView{types.FILES}},
-				)
+							self.c.Refresh(
+								types.RefreshOptions{Scope: []types.RefreshableView{types.FILES}},
+							)
+							return nil
+						},
+					})
+				return nil
 			},
-			Key:     'x',
+			Keys:    menuKey('x'),
 			Tooltip: self.c.Tr.NukeDescription,
 		},
 		{
@@ -57,11 +67,12 @@ func (self *FilesController) createResetMenu() error {
 					return err
 				}
 
-				return self.c.Refresh(
-					types.RefreshOptions{Mode: types.ASYNC, Scope: []types.RefreshableView{types.FILES}},
+				self.c.Refresh(
+					types.RefreshOptions{Scope: []types.RefreshableView{types.FILES}},
 				)
+				return nil
 			},
-			Key: 'u',
+			Keys: menuKey('u'),
 		},
 		{
 			LabelColumns: []string{
@@ -74,11 +85,12 @@ func (self *FilesController) createResetMenu() error {
 					return err
 				}
 
-				return self.c.Refresh(
-					types.RefreshOptions{Mode: types.ASYNC, Scope: []types.RefreshableView{types.FILES}},
+				self.c.Refresh(
+					types.RefreshOptions{Scope: []types.RefreshableView{types.FILES}},
 				)
+				return nil
 			},
-			Key: 'c',
+			Keys: menuKey('c'),
 		},
 		{
 			LabelColumns: []string{
@@ -88,7 +100,7 @@ func (self *FilesController) createResetMenu() error {
 			Tooltip: self.c.Tr.DiscardStagedChangesDescription,
 			OnPress: func() error {
 				self.c.LogAction(self.c.Tr.Actions.RemoveStagedFiles)
-				if !self.c.Helpers().WorkingTree.IsWorkingTreeDirty() {
+				if !self.c.Helpers().WorkingTree.IsWorkingTreeDirtyExceptSubmodules() {
 					return errors.New(self.c.Tr.NoTrackedStagedFilesStash)
 				}
 				if err := self.c.Git().Stash.SaveStagedChanges("[lazygit] tmp stash"); err != nil {
@@ -98,11 +110,12 @@ func (self *FilesController) createResetMenu() error {
 					return err
 				}
 
-				return self.c.Refresh(
-					types.RefreshOptions{Mode: types.ASYNC, Scope: []types.RefreshableView{types.FILES}},
+				self.c.Refresh(
+					types.RefreshOptions{Scope: []types.RefreshableView{types.FILES}},
 				)
+				return nil
 			},
-			Key: 'S',
+			Keys: menuKey('S'),
 		},
 		{
 			LabelColumns: []string{
@@ -115,11 +128,12 @@ func (self *FilesController) createResetMenu() error {
 					return err
 				}
 
-				return self.c.Refresh(
-					types.RefreshOptions{Mode: types.ASYNC, Scope: []types.RefreshableView{types.FILES}},
+				self.c.Refresh(
+					types.RefreshOptions{Scope: []types.RefreshableView{types.FILES}},
 				)
+				return nil
 			},
-			Key: 's',
+			Keys: menuKey('s'),
 		},
 		{
 			LabelColumns: []string{
@@ -132,11 +146,12 @@ func (self *FilesController) createResetMenu() error {
 					return err
 				}
 
-				return self.c.Refresh(
-					types.RefreshOptions{Mode: types.ASYNC, Scope: []types.RefreshableView{types.FILES}},
+				self.c.Refresh(
+					types.RefreshOptions{Scope: []types.RefreshableView{types.FILES}},
 				)
+				return nil
 			},
-			Key: 'm',
+			Keys: menuKey('m'),
 		},
 		{
 			LabelColumns: []string{
@@ -144,16 +159,24 @@ func (self *FilesController) createResetMenu() error {
 				red.Sprint("git reset --hard HEAD"),
 			},
 			OnPress: func() error {
-				self.c.LogAction(self.c.Tr.Actions.HardReset)
-				if err := self.c.Git().WorkingTree.ResetHard("HEAD"); err != nil {
-					return err
-				}
+				return self.c.ConfirmIf(helpers.IsWorkingTreeDirtyExceptSubmodules(self.c.Model().Files, self.c.Model().Submodules),
+					types.ConfirmOpts{
+						Title:  self.c.Tr.Actions.HardReset,
+						Prompt: self.c.Tr.ResetHardConfirmation,
+						HandleConfirm: func() error {
+							self.c.LogAction(self.c.Tr.Actions.HardReset)
+							if err := self.c.Git().WorkingTree.ResetHard("HEAD"); err != nil {
+								return err
+							}
 
-				return self.c.Refresh(
-					types.RefreshOptions{Mode: types.ASYNC, Scope: []types.RefreshableView{types.FILES}},
-				)
+							self.c.Refresh(
+								types.RefreshOptions{Scope: []types.RefreshableView{types.FILES}},
+							)
+							return nil
+						},
+					})
 			},
-			Key: 'h',
+			Keys: menuKey('h'),
 		},
 	}
 
@@ -162,17 +185,14 @@ func (self *FilesController) createResetMenu() error {
 
 func (self *FilesController) animateExplosion() {
 	self.Explode(self.c.Views().Files, func() {
-		err := self.c.PostRefreshUpdate(self.c.Contexts().Files)
-		if err != nil {
-			self.c.Log.Error(err)
-		}
+		self.c.PostRefreshUpdate(self.c.Contexts().Files)
 	})
 }
 
 // Animates an explosion within the view by drawing a bunch of flamey characters
 func (self *FilesController) Explode(v *gocui.View, onDone func()) {
 	width := v.InnerWidth()
-	height := v.InnerHeight() + 1
+	height := v.InnerHeight()
 	styles := []style.TextStyle{
 		style.FgLightWhite.SetBold(),
 		style.FgYellow.SetBold(),
@@ -183,12 +203,12 @@ func (self *FilesController) Explode(v *gocui.View, onDone func()) {
 
 	self.c.OnWorker(func(_ gocui.Task) error {
 		max := 25
-		for i := 0; i < max; i++ {
+		for i := range max {
 			image := getExplodeImage(width, height, i, max)
 			style := styles[(i*len(styles)/max)%len(styles)]
 			coloredImage := style.Sprint(image)
 			self.c.OnUIThread(func() error {
-				_ = v.SetOrigin(0, 0)
+				v.SetOrigin(0, 0)
 				v.SetContent(coloredImage)
 				return nil
 			})
@@ -232,8 +252,8 @@ func getExplodeImage(width int, height int, frame int, max int) string {
 		innerRadius = (progress - 0.5) * 2 * maxRadius
 	}
 
-	for y := 0; y < height; y++ {
-		for x := 0; x < width; x++ {
+	for y := range height {
+		for x := range width {
 			// calculate distance from center, scale x by 2 to compensate for character aspect ratio
 			distance := math.Hypot(float64(x-centerX), float64(y-centerY)*2)
 

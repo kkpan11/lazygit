@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/jesseduffield/gocui"
 	"github.com/jesseduffield/lazygit/pkg/commands/git_commands"
 	"github.com/jesseduffield/lazygit/pkg/commands/models"
+	"github.com/jesseduffield/lazygit/pkg/gocui"
 	"github.com/jesseduffield/lazygit/pkg/gui/context"
 	"github.com/jesseduffield/lazygit/pkg/gui/types"
 	"github.com/jesseduffield/lazygit/pkg/utils"
@@ -32,14 +32,14 @@ func NewSyncController(
 func (self *SyncController) GetKeybindings(opts types.KeybindingsOpts) []*types.Binding {
 	bindings := []*types.Binding{
 		{
-			Key:               opts.GetKey(opts.Config.Universal.Push),
+			Keys:              opts.GetKeys(opts.Config.Universal.Push),
 			Handler:           opts.Guards.NoPopupPanel(self.HandlePush),
 			GetDisabledReason: self.getDisabledReasonForPushOrPull,
 			Description:       self.c.Tr.Push,
 			Tooltip:           self.c.Tr.PushTooltip,
 		},
 		{
-			Key:               opts.GetKey(opts.Config.Universal.Pull),
+			Keys:              opts.GetKeys(opts.Config.Universal.Pull),
 			Handler:           opts.Guards.NoPopupPanel(self.HandlePull),
 			GetDisabledReason: self.getDisabledReasonForPushOrPull,
 			Description:       self.c.Tr.Pull,
@@ -92,27 +92,27 @@ func (self *SyncController) push(currentBranch *models.Branch) error {
 		opts := pushOpts{remoteBranchStoredLocally: currentBranch.RemoteBranchStoredLocally()}
 		if currentBranch.IsBehindForPush() {
 			return self.requestToForcePush(currentBranch, opts)
-		} else {
-			return self.pushAux(currentBranch, opts)
 		}
-	} else {
-		if self.c.Git().Config.GetPushToCurrent() {
-			return self.pushAux(currentBranch, pushOpts{setUpstream: true})
-		} else {
-			return self.c.Helpers().Upstream.PromptForUpstreamWithInitialContent(currentBranch, func(upstream string) error {
-				upstreamRemote, upstreamBranch, err := self.c.Helpers().Upstream.ParseUpstream(upstream)
-				if err != nil {
-					return err
-				}
 
-				return self.pushAux(currentBranch, pushOpts{
-					setUpstream:    true,
-					upstreamRemote: upstreamRemote,
-					upstreamBranch: upstreamBranch,
-				})
-			})
-		}
+		return self.pushAux(currentBranch, opts)
 	}
+
+	if self.c.Git().Config.GetPushToCurrent() {
+		return self.pushAux(currentBranch, pushOpts{setUpstream: true})
+	}
+
+	return self.c.Helpers().Upstream.PromptForUpstreamWithInitialContent(currentBranch, func(upstream string) error {
+		upstreamRemote, upstreamBranch, err := self.c.Helpers().Upstream.ParseUpstream(upstream)
+		if err != nil {
+			return err
+		}
+
+		return self.pushAux(currentBranch, pushOpts{
+			setUpstream:    true,
+			upstreamRemote: upstreamRemote,
+			upstreamBranch: upstreamBranch,
+		})
+	})
 }
 
 func (self *SyncController) pull(currentBranch *models.Branch) error {
@@ -175,7 +175,7 @@ func (self *SyncController) pullWithLock(task gocui.Task, opts PullFilesOptions)
 		},
 	)
 
-	return self.c.Helpers().MergeAndRebase.CheckMergeOrRebase(err)
+	return self.c.Helpers().MergeAndRebase.CheckMergeOrRebaseAndSelectHeadCommit(err)
 }
 
 type pushOpts struct {
@@ -200,6 +200,7 @@ func (self *SyncController) pushAux(currentBranch *models.Branch, opts pushOpts)
 			git_commands.PushOpts{
 				Force:          opts.force,
 				ForceWithLease: opts.forceWithLease,
+				CurrentBranch:  currentBranch.Name,
 				UpstreamRemote: opts.upstreamRemote,
 				UpstreamBranch: opts.upstreamBranch,
 				SetUpstream:    opts.setUpstream,
@@ -214,7 +215,7 @@ func (self *SyncController) pushAux(currentBranch *models.Branch, opts pushOpts)
 				if forcePushDisabled {
 					return errors.New(self.c.Tr.UpdatesRejectedAndForcePushDisabled)
 				}
-				_ = self.c.Confirm(types.ConfirmOpts{
+				self.c.Confirm(types.ConfirmOpts{
 					Title:  self.c.Tr.ForcePush,
 					Prompt: self.forcePushPrompt(),
 					HandleConfirm: func() error {
@@ -228,7 +229,8 @@ func (self *SyncController) pushAux(currentBranch *models.Branch, opts pushOpts)
 			}
 			return err
 		}
-		return self.c.Refresh(types.RefreshOptions{Mode: types.ASYNC})
+		self.c.RefreshFromWorker(types.RefreshOptions{})
+		return nil
 	})
 }
 
@@ -238,7 +240,7 @@ func (self *SyncController) requestToForcePush(currentBranch *models.Branch, opt
 		return errors.New(self.c.Tr.ForcePushDisabled)
 	}
 
-	return self.c.Confirm(types.ConfirmOpts{
+	self.c.Confirm(types.ConfirmOpts{
 		Title:  self.c.Tr.ForcePush,
 		Prompt: self.forcePushPrompt(),
 		HandleConfirm: func() error {
@@ -246,14 +248,16 @@ func (self *SyncController) requestToForcePush(currentBranch *models.Branch, opt
 			return self.pushAux(currentBranch, opts)
 		},
 	})
+
+	return nil
 }
 
 func (self *SyncController) forcePushPrompt() string {
 	return utils.ResolvePlaceholderString(
 		self.c.Tr.ForcePushPrompt,
 		map[string]string{
-			"cancelKey":  self.c.UserConfig().Keybinding.Universal.Return,
-			"confirmKey": self.c.UserConfig().Keybinding.Universal.Confirm,
+			"cancelKey":  self.c.UserConfig().Keybinding.Universal.Return.String(),
+			"confirmKey": self.c.UserConfig().Keybinding.Universal.Confirm.String(),
 		},
 	)
 }

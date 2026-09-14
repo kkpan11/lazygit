@@ -10,7 +10,9 @@ var RebaseAndDrop = NewIntegrationTest(NewIntegrationTestArgs{
 	Description:  "Rebase onto another branch, deal with the conflicts. Also mark a commit to be dropped before continuing.",
 	ExtraCmdArgs: []string{},
 	Skip:         false,
-	SetupConfig:  func(config *config.AppConfig) {},
+	SetupConfig: func(config *config.AppConfig) {
+		config.GetUserConfig().Git.LocalBranchSortOrder = "recency"
+	},
 	SetupRepo: func(shell *Shell) {
 		shared.MergeConflictsSetup(shell)
 		// adding a couple additional commits so that we can drop one
@@ -51,19 +53,23 @@ var RebaseAndDrop = NewIntegrationTest(NewIntegrationTestArgs{
 		t.Views().Commits().
 			Focus().
 			TopLines(
-				MatchesRegexp(`pick.*to keep`).IsSelected(),
+				Contains("─── Pending rebase todos"),
+				MatchesRegexp(`pick.*to keep`),
 				MatchesRegexp(`pick.*to remove`),
-				MatchesRegexp(`conflict.*YOU ARE HERE.*first change`),
+				MatchesRegexp(`pick.*CONFLICT.*first change`).IsSelected(),
+				Contains("─── Commits"),
 				MatchesRegexp("second-change-branch unrelated change"),
 				MatchesRegexp("second change"),
 				MatchesRegexp("original"),
 			).
-			SelectNextItem().
+			NavigateToLine(Contains("to remove")).
 			Press(keys.Universal.Remove).
 			TopLines(
+				Contains("─── Pending rebase todos"),
 				MatchesRegexp(`pick.*to keep`),
 				MatchesRegexp(`drop.*to remove`).IsSelected(),
-				MatchesRegexp(`conflict.*YOU ARE HERE.*first change`),
+				MatchesRegexp(`pick.*CONFLICT.*first change`),
+				Contains("─── Commits"),
 				MatchesRegexp("second-change-branch unrelated change"),
 				MatchesRegexp("second change"),
 				MatchesRegexp("original"),
@@ -77,7 +83,7 @@ var RebaseAndDrop = NewIntegrationTest(NewIntegrationTestArgs{
 			IsFocused().
 			PressPrimaryAction()
 
-		t.Common().ContinueOnConflictsResolved()
+		t.Common().ContinueOnConflictsResolved("rebase")
 
 		t.Views().Information().Content(DoesNotContain("Rebasing"))
 

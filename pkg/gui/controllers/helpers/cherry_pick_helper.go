@@ -1,10 +1,13 @@
 package helpers
 
 import (
-	"github.com/jesseduffield/gocui"
+	"strconv"
+
 	"github.com/jesseduffield/lazygit/pkg/commands/models"
+	"github.com/jesseduffield/lazygit/pkg/gocui"
 	"github.com/jesseduffield/lazygit/pkg/gui/modes/cherrypicking"
 	"github.com/jesseduffield/lazygit/pkg/gui/types"
+	"github.com/jesseduffield/lazygit/pkg/utils"
 	"github.com/samber/lo"
 )
 
@@ -38,10 +41,18 @@ func (self *CherryPickHelper) CopyRange(commitsList []*models.Commit, context ty
 		return err
 	}
 
+	// After a paste the buffer is hidden but not cleared, so the user
+	// thinks they're starting fresh. Clear it before adding so the new
+	// copy replaces the old one.
+	if self.getData().DidPaste {
+		self.getData().CherryPickedCommits = nil
+		self.getData().DidPaste = false
+	}
+
 	commitSet := self.getData().SelectedHashSet()
 
 	allCommitsCopied := lo.EveryBy(commitsList[startIdx:endIdx+1], func(commit *models.Commit) bool {
-		return commitSet.Includes(commit.Hash)
+		return commitSet.Includes(commit.Hash())
 	})
 
 	// if all selected commits are already copied, we'll uncopy them
@@ -57,68 +68,87 @@ func (self *CherryPickHelper) CopyRange(commitsList []*models.Commit, context ty
 		}
 	}
 
-	return self.rerender()
+	self.rerender()
+	return nil
 }
 
 // HandlePasteCommits begins a cherry-pick rebase with the commits the user has copied.
 // Only to be called from the branch commits controller
 func (self *CherryPickHelper) Paste() error {
-	return self.c.Confirm(types.ConfirmOpts{
-		Title:  self.c.Tr.CherryPick,
-		Prompt: self.c.Tr.SureCherryPick,
+	self.c.Confirm(types.ConfirmOpts{
+		Title: self.c.Tr.CherryPick,
+		Prompt: utils.ResolvePlaceholderString(
+			self.c.Tr.SureCherryPick,
+			map[string]string{
+				"numCommits": strconv.Itoa(len(self.getData().CherryPickedCommits)),
+			}),
 		HandleConfirm: func() error {
-			isInRebase, err := self.c.Git().Status.IsInInteractiveRebase()
-			if err != nil {
-				return err
-			}
-			if isInRebase {
-				if err := self.c.Git().Rebase.CherryPickCommitsDuringRebase(self.getData().CherryPickedCommits); err != nil {
-					return err
-				}
-				err = self.c.Refresh(types.RefreshOptions{
-					Mode: types.SYNC, Scope: []types.RefreshableView{types.REBASE_COMMITS},
-				})
-				if err != nil {
-					return err
-				}
-
-				return self.Reset()
-			}
-
-			return self.c.WithWaitingStatus(self.c.Tr.CherryPickingStatus, func(gocui.Task) error {
+			mustStash := IsWorkingTreeDirtyExceptSubmodules(self.c.Model().Files, self.c.Model().Submodules)
+			cherryPickedCommits := self.getData().CherryPickedCommits
+			return self.c.WithWaitingStatusBlockingInput(types.WaitingStatusOpts{
+				Message:              self.c.Tr.CherryPickingStatus,
+				HideWorkingTreeState: true,
+			}, func(gocui.Task) error {
 				self.c.LogAction(self.c.Tr.Actions.CherryPick)
-				err := self.c.Git().Rebase.CherryPickCommits(self.getData().CherryPickedCommits)
-				err = self.rebaseHelper.CheckMergeOrRebase(err)
-				if err != nil {
-					return err
+
+				if mustStash {
+					if err := self.c.Git().Stash.Push(self.c.Tr.AutoStashForCherryPicking); err != nil {
+						return err
+					}
 				}
 
-				// If we're in an interactive rebase at this point, it must
-				// be because there were conflicts. Don't clear the copied
-				// commits in this case, since we might want to abort and
-				// try pasting them again.
-				isInRebase, err = self.c.Git().Status.IsInInteractiveRebase()
+				result := self.c.Git().Rebase.CherryPickCommits(cherryPickedCommits)
+				err := self.rebaseHelper.CheckMergeOrRebaseWithRefreshOptions(result,
+					types.RefreshOptions{BatchUIUpdates: true})
 				if err != nil {
-					return err
+					return result
 				}
-				if !isInRebase {
-					return self.Reset()
+
+				// If we're in the cherry-picking state at this point, it must
+				// be because there were conflicts. Don't clear the copied
+				// commits in this case, since we might want to abort and try
+				// pasting them again.
+				isInCherryPick, result := self.c.Git().Status.IsInCherryPick()
+				if result != nil {
+					return result
 				}
+				if !isInCherryPick {
+					// DidPaste and the re-render touch mode state and contexts,
+					// so run them on the UI thread.
+					self.c.OnUIThread(func() error {
+						self.getData().DidPaste = true
+						self.rerender()
+						return nil
+					})
+
+					if mustStash {
+						if err := self.c.Git().Stash.Pop(0); err != nil {
+							return err
+						}
+						self.c.RefreshFromWorker(types.RefreshOptions{
+							Scope: []types.RefreshableView{types.STASH, types.FILES},
+						})
+					}
+				}
+
 				return nil
 			})
 		},
 	})
+
+	return nil
 }
 
 func (self *CherryPickHelper) CanPaste() bool {
-	return self.getData().Active()
+	return self.getData().CanPaste()
 }
 
 func (self *CherryPickHelper) Reset() error {
 	self.getData().ContextKey = ""
 	self.getData().CherryPickedCommits = nil
 
-	return self.rerender()
+	self.rerender()
+	return nil
 }
 
 // you can only copy from one context at a time, because the order and position of commits matter
@@ -134,16 +164,12 @@ func (self *CherryPickHelper) resetIfNecessary(context types.Context) error {
 	return nil
 }
 
-func (self *CherryPickHelper) rerender() error {
+func (self *CherryPickHelper) rerender() {
 	for _, context := range []types.Context{
 		self.c.Contexts().LocalCommits,
 		self.c.Contexts().ReflogCommits,
 		self.c.Contexts().SubCommits,
 	} {
-		if err := self.c.PostRefreshUpdate(context); err != nil {
-			return err
-		}
+		self.c.PostRefreshUpdate(context)
 	}
-
-	return nil
 }

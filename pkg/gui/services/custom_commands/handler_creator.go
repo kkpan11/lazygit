@@ -6,8 +6,8 @@ import (
 	"strings"
 	"text/template"
 
-	"github.com/jesseduffield/gocui"
 	"github.com/jesseduffield/lazygit/pkg/config"
+	"github.com/jesseduffield/lazygit/pkg/gocui"
 	"github.com/jesseduffield/lazygit/pkg/gui/controllers/helpers"
 	"github.com/jesseduffield/lazygit/pkg/gui/style"
 	"github.com/jesseduffield/lazygit/pkg/gui/types"
@@ -106,10 +106,39 @@ func (self *HandlerCreator) call(customCommand config.CustomCommand) func() erro
 			default:
 				return errors.New("custom command prompt must have a type of 'input', 'menu', 'menuFromCommand', or 'confirm'")
 			}
+
+			if prompt.Condition != "" {
+				showPrompt := f
+				conditionTemplate := prompt.Condition
+				f = func() error {
+					resolved, err := resolveCondition(conditionTemplate, resolveTemplate)
+					if err != nil {
+						return err
+					}
+					if resolved {
+						return showPrompt()
+					}
+					if _, exists := form[prompt.Key]; !exists {
+						form[prompt.Key] = ""
+					}
+					return g()
+				}
+			}
 		}
 
 		return f()
 	}
+}
+
+func resolveCondition(condition string, resolveTemplate func(string) (string, error)) (bool, error) {
+	if strings.TrimSpace(condition) == "" {
+		return false, nil
+	}
+	resolved, err := resolveTemplate(condition)
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(resolved) != "" && strings.TrimSpace(resolved) != "false", nil
 }
 
 func (self *HandlerCreator) inputPrompt(prompt *config.CustomCommandPrompt, wrappedF func(string) error) error {
@@ -118,14 +147,18 @@ func (self *HandlerCreator) inputPrompt(prompt *config.CustomCommandPrompt, wrap
 		return err
 	}
 
-	return self.c.Prompt(types.PromptOpts{
+	self.c.Prompt(types.PromptOpts{
 		Title:               prompt.Title,
 		InitialContent:      prompt.InitialValue,
 		FindSuggestionsFunc: findSuggestionsFn,
 		HandleConfirm: func(str string) error {
 			return wrappedF(str)
 		},
+		AllowEmptyInput:    true,
+		PreserveWhitespace: true,
 	})
+
+	return nil
 }
 
 func (self *HandlerCreator) generateFindSuggestionsFunc(prompt *config.CustomCommandPrompt) (func(string) []*types.Suggestion, error) {
@@ -146,7 +179,7 @@ func (self *HandlerCreator) generateFindSuggestionsFunc(prompt *config.CustomCom
 
 func (self *HandlerCreator) getCommandSuggestionsFn(command string) (func(string) []*types.Suggestion, error) {
 	lines := []*types.Suggestion{}
-	err := self.c.OS().Cmd.NewShell(command).RunAndProcessLines(func(line string) (bool, error) {
+	err := self.c.OS().Cmd.NewShell(command, self.c.UserConfig().OS.ShellFunctionsFile).RunAndProcessLines(func(line string) (bool, error) {
 		lines = append(lines, &types.Suggestion{Value: line, Label: line})
 		return false, nil
 	})
@@ -183,11 +216,13 @@ func (self *HandlerCreator) getPresetSuggestionsFn(preset string) (func(string) 
 }
 
 func (self *HandlerCreator) confirmPrompt(prompt *config.CustomCommandPrompt, handleConfirm func() error) error {
-	return self.c.Confirm(types.ConfirmOpts{
+	self.c.Confirm(types.ConfirmOpts{
 		Title:         prompt.Title,
 		Prompt:        prompt.Body,
 		HandleConfirm: handleConfirm,
 	})
+
+	return nil
 }
 
 func (self *HandlerCreator) menuPrompt(prompt *config.CustomCommandPrompt, wrappedF func(string) error) error {
@@ -197,6 +232,7 @@ func (self *HandlerCreator) menuPrompt(prompt *config.CustomCommandPrompt, wrapp
 			OnPress: func() error {
 				return wrappedF(option.Value)
 			},
+			Keys: config.GetValidatedKeyBindingKeys(option.Key),
 		}
 	})
 
@@ -242,7 +278,8 @@ func (self *HandlerCreator) getResolveTemplateFn(form map[string]string, promptR
 	}
 
 	funcs := template.FuncMap{
-		"quote": self.c.OS().Quote,
+		"quote":      self.c.OS().Quote,
+		"runCommand": self.c.Git().Custom.TemplateFunctionRunCommand,
 	}
 
 	return func(templateStr string) (string, error) { return utils.ResolveTemplate(templateStr, objects, funcs) }
@@ -255,9 +292,9 @@ func (self *HandlerCreator) finalHandler(customCommand config.CustomCommand, ses
 		return err
 	}
 
-	cmdObj := self.c.OS().Cmd.NewShell(cmdStr)
+	cmdObj := self.c.OS().Cmd.NewShell(cmdStr, self.c.UserConfig().OS.ShellFunctionsFile)
 
-	if customCommand.Subprocess {
+	if customCommand.Output == "terminal" {
 		return self.c.RunSubprocessAndRefresh(cmdObj)
 	}
 
@@ -269,24 +306,29 @@ func (self *HandlerCreator) finalHandler(customCommand config.CustomCommand, ses
 	return self.c.WithWaitingStatus(loadingText, func(gocui.Task) error {
 		self.c.LogAction(self.c.Tr.Actions.CustomCommand)
 
-		if customCommand.Stream {
+		if customCommand.Output == "log" || customCommand.Output == "logWithPty" {
 			cmdObj.StreamOutput()
+		}
+		if customCommand.Output == "logWithPty" {
+			cmdObj.UsePty()
 		}
 		output, err := cmdObj.RunWithOutput()
 
-		if refreshErr := self.c.Refresh(types.RefreshOptions{Mode: types.ASYNC}); err != nil {
-			self.c.Log.Error(refreshErr)
-		}
+		self.c.RefreshFromWorker(types.RefreshOptions{})
 
 		if err != nil {
-			if customCommand.After.CheckForConflicts {
+			if customCommand.After != nil && customCommand.After.CheckForConflicts {
+				// The custom command may have started a rebase/merge/etc.; if so,
+				// it's one we consider started in lazygit, so that we offer to
+				// continue it once its conflicts are resolved.
+				self.mergeAndRebaseHelper.RecordWhetherMergeOrRebaseStartedInLazygit()
 				return self.mergeAndRebaseHelper.CheckForConflicts(err)
 			}
 
 			return err
 		}
 
-		if customCommand.ShowOutput {
+		if customCommand.Output == "popup" {
 			if strings.TrimSpace(output) == "" {
 				output = self.c.Tr.EmptyOutput
 			}
@@ -298,7 +340,7 @@ func (self *HandlerCreator) finalHandler(customCommand config.CustomCommand, ses
 					return err
 				}
 			}
-			return self.c.Alert(title, output)
+			self.c.Alert(title, output)
 		}
 
 		return nil

@@ -22,7 +22,7 @@ func NewGitFlowController(
 ) *GitFlowController {
 	return &GitFlowController{
 		baseController: baseController{},
-		ListControllerTrait: NewListControllerTrait[*models.Branch](
+		ListControllerTrait: NewListControllerTrait(
 			c,
 			c.Contexts().Branches,
 			c.Contexts().Branches.GetSelected,
@@ -35,7 +35,7 @@ func NewGitFlowController(
 func (self *GitFlowController) GetKeybindings(opts types.KeybindingsOpts) []*types.Binding {
 	bindings := []*types.Binding{
 		{
-			Key:         opts.GetKey(opts.Config.Branches.ViewGitFlowOptions),
+			Keys:        opts.GetKeys(opts.Config.Branches.ViewGitFlowOptions),
 			Handler:     self.withItem(self.handleCreateGitFlowMenu),
 			Description: self.c.Tr.GitFlowOptions,
 			OpensMenu:   true,
@@ -54,7 +54,7 @@ func (self *GitFlowController) handleCreateGitFlowMenu(branch *models.Branch) er
 		return func() error {
 			title := utils.ResolvePlaceholderString(self.c.Tr.NewGitFlowBranchPrompt, map[string]string{"branchType": branchType})
 
-			return self.c.Prompt(types.PromptOpts{
+			self.c.Prompt(types.PromptOpts{
 				Title: title,
 				HandleConfirm: func(name string) error {
 					self.c.LogAction(self.c.Tr.Actions.GitFlowStart)
@@ -63,6 +63,8 @@ func (self *GitFlowController) handleCreateGitFlowMenu(branch *models.Branch) er
 					)
 				},
 			})
+
+			return nil
 		}
 	}
 
@@ -80,22 +82,22 @@ func (self *GitFlowController) handleCreateGitFlowMenu(branch *models.Branch) er
 			{
 				Label:   "start feature",
 				OnPress: startHandler("feature"),
-				Key:     'f',
+				Keys:    menuKey('f'),
 			},
 			{
 				Label:   "start hotfix",
 				OnPress: startHandler("hotfix"),
-				Key:     'h',
+				Keys:    menuKey('h'),
 			},
 			{
 				Label:   "start bugfix",
 				OnPress: startHandler("bugfix"),
-				Key:     'b',
+				Keys:    menuKey('b'),
 			},
 			{
 				Label:   "start release",
 				OnPress: startHandler("release"),
-				Key:     'r',
+				Keys:    menuKey('r'),
 			},
 		},
 	})

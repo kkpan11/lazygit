@@ -1,19 +1,17 @@
 package oscommands
 
 import (
-	"fmt"
+	"bytes"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 
 	"github.com/go-errors/errors"
 	"github.com/samber/lo"
 
 	"github.com/atotto/clipboard"
-	"github.com/jesseduffield/kill"
 	"github.com/jesseduffield/lazygit/pkg/common"
 	"github.com/jesseduffield/lazygit/pkg/config"
 	"github.com/jesseduffield/lazygit/pkg/utils"
@@ -27,6 +25,8 @@ type OSCommand struct {
 	guiIO    *guiIO
 
 	removeFileFn func(string) error
+	isDirEmptyFn func(string) (bool, error)
+	removeDirFn  func(string) error
 
 	Cmd *CmdObjBuilder
 
@@ -35,13 +35,12 @@ type OSCommand struct {
 
 // Platform stores the os state
 type Platform struct {
-	OS                  string
-	Shell               string
-	InteractiveShell    string
-	ShellArg            string
-	InteractiveShellArg string
-	OpenCommand         string
-	OpenLinkCommand     string
+	OS                          string
+	Shell                       string
+	ShellArg                    string
+	PrefixForShellFunctionsFile string
+	OpenCommand                 string
+	OpenLinkCommand             string
 }
 
 // NewOSCommand os command runner
@@ -51,6 +50,8 @@ func NewOSCommand(common *common.Common, config config.AppConfigurer, platform *
 		Platform:     platform,
 		getenvFn:     os.Getenv,
 		removeFileFn: os.RemoveAll,
+		isDirEmptyFn: isDirEmpty,
+		removeDirFn:  os.Remove,
 		guiIO:        guiIO,
 		tempDir:      config.GetTempDir(),
 	}
@@ -82,25 +83,17 @@ func FileType(path string) string {
 func (c *OSCommand) OpenFile(filename string) error {
 	commandTemplate := c.UserConfig().OS.Open
 	if commandTemplate == "" {
-		// Legacy support
-		commandTemplate = c.UserConfig().OS.OpenCommand
-	}
-	if commandTemplate == "" {
 		commandTemplate = config.GetPlatformDefaultConfig().Open
 	}
 	templateValues := map[string]string{
 		"filename": c.Quote(filename),
 	}
 	command := utils.ResolvePlaceholderString(commandTemplate, templateValues)
-	return c.Cmd.NewShell(command).Run()
+	return c.Cmd.NewShell(command, c.UserConfig().OS.ShellFunctionsFile).Run()
 }
 
 func (c *OSCommand) OpenLink(link string) error {
 	commandTemplate := c.UserConfig().OS.OpenLink
-	if commandTemplate == "" {
-		// Legacy support
-		commandTemplate = c.UserConfig().OS.OpenLinkCommand
-	}
 	if commandTemplate == "" {
 		commandTemplate = config.GetPlatformDefaultConfig().OpenLink
 	}
@@ -109,7 +102,7 @@ func (c *OSCommand) OpenLink(link string) error {
 	}
 
 	command := utils.ResolvePlaceholderString(commandTemplate, templateValues)
-	return c.Cmd.NewShell(command).Run()
+	return c.Cmd.NewShell(command, c.UserConfig().OS.ShellFunctionsFile).Run()
 }
 
 // Quote wraps a message in platform-specific quotation marks
@@ -209,13 +202,13 @@ func (c *OSCommand) FileExists(path string) (bool, error) {
 }
 
 // PipeCommands runs a heap of commands and pipes their inputs/outputs together like A | B | C
-func (c *OSCommand) PipeCommands(cmdObjs ...ICmdObj) error {
-	cmds := lo.Map(cmdObjs, func(cmdObj ICmdObj, _ int) *exec.Cmd {
+func (c *OSCommand) PipeCommands(cmdObjs ...*CmdObj) error {
+	cmds := lo.Map(cmdObjs, func(cmdObj *CmdObj, _ int) *exec.Cmd {
 		return cmdObj.GetCmd()
 	})
 
 	logCmdStr := strings.Join(
-		lo.Map(cmdObjs, func(cmdObj ICmdObj, _ int) string {
+		lo.Map(cmdObjs, func(cmdObj *CmdObj, _ int) string {
 			return cmdObj.ToString()
 		}),
 		" | ",
@@ -223,7 +216,7 @@ func (c *OSCommand) PipeCommands(cmdObjs ...ICmdObj) error {
 
 	c.LogCommand(logCmdStr, true)
 
-	for i := 0; i < len(cmds)-1; i++ {
+	for i := range len(cmds) - 1 {
 		stdout, err := cmds[i].StdoutPipe()
 		if err != nil {
 			return err
@@ -235,37 +228,47 @@ func (c *OSCommand) PipeCommands(cmdObjs ...ICmdObj) error {
 	// keeping this here in case I adapt this code for some other purpose in the future
 	// cmds[len(cmds)-1].Stdout = os.Stdout
 
-	finalErrors := []string{}
-
-	wg := sync.WaitGroup{}
-	wg.Add(len(cmds))
-
-	for _, cmd := range cmds {
-		go utils.Safe(func() {
-			stderr, err := cmd.StderrPipe()
-			if err != nil {
-				c.Log.Error(err)
-			}
-
-			if err := cmd.Start(); err != nil {
-				c.Log.Error(err)
-			}
-
-			if b, err := io.ReadAll(stderr); err == nil {
-				if len(b) > 0 {
-					finalErrors = append(finalErrors, string(b))
-				}
-			}
-
-			if err := cmd.Wait(); err != nil {
-				c.Log.Error(err)
-			}
-
-			wg.Done()
-		})
+	stderrs := make([]bytes.Buffer, len(cmds))
+	for i := range cmds {
+		cmds[i].Stderr = &stderrs[i]
 	}
 
-	wg.Wait()
+	// Start every command before waiting for any of them: waiting for a command
+	// closes our end of the pipe that feeds the next one, and a command that
+	// hasn't been started by then would inherit a closed stdin.
+	started := 0
+	var startErr error
+	for _, cmd := range cmds {
+		if err := cmd.Start(); err != nil {
+			startErr = err
+			break
+		}
+
+		started++
+	}
+
+	finalErrors := []string{}
+
+	if startErr != nil {
+		c.Log.Error(startErr)
+		finalErrors = append(finalErrors, startErr.Error())
+
+		// Without the rest of the pipeline to drain them, the commands we did
+		// start could block forever writing to a full pipe.
+		for _, cmd := range cmds[:started] {
+			_ = cmd.Process.Kill()
+		}
+	}
+
+	for i, cmd := range cmds[:started] {
+		if err := cmd.Wait(); err != nil {
+			c.Log.Error(err)
+		}
+
+		if stderrs[i].Len() > 0 {
+			finalErrors = append(finalErrors, stderrs[i].String())
+		}
+	}
 
 	if len(finalErrors) > 0 {
 		return errors.New(strings.Join(finalErrors, "\n"))
@@ -273,18 +276,8 @@ func (c *OSCommand) PipeCommands(cmdObjs ...ICmdObj) error {
 	return nil
 }
 
-// Kill kills a process. If the process has Setpgid == true, then we have anticipated that it might spawn its own child processes, so we've given it a process group ID (PGID) equal to its process id (PID) and given its child processes will inherit the PGID, we can kill that group, rather than killing the process itself.
-func Kill(cmd *exec.Cmd) error {
-	return kill.Kill(cmd)
-}
-
-// PrepareForChildren sets Setpgid to true on the cmd, so that when we run it as a subprocess, we can kill its group rather than the process itself. This is because some commands, like `docker-compose logs` spawn multiple children processes, and killing the parent process isn't sufficient for killing those child processes. We set the group id here, and then in subprocess.go we check if the group id is set and if so, we kill the whole group rather than just the one process.
-func PrepareForChildren(cmd *exec.Cmd) {
-	kill.PrepareForChildren(cmd)
-}
-
 func (c *OSCommand) CopyToClipboard(str string) error {
-	escaped := strings.Replace(str, "\n", "\\n", -1)
+	escaped := strings.ReplaceAll(str, "\n", "\\n")
 	truncated := utils.TruncateWithEllipsis(escaped, 40)
 
 	msg := utils.ResolvePlaceholderString(
@@ -298,7 +291,7 @@ func (c *OSCommand) CopyToClipboard(str string) error {
 		cmdStr := utils.ResolvePlaceholderString(c.UserConfig().OS.CopyToClipboardCmd, map[string]string{
 			"text": c.Cmd.Quote(str),
 		})
-		return c.Cmd.NewShell(cmdStr).Run()
+		return c.Cmd.NewShell(cmdStr, c.UserConfig().OS.ShellFunctionsFile).Run()
 	}
 
 	return clipboard.WriteAll(str)
@@ -309,7 +302,7 @@ func (c *OSCommand) PasteFromClipboard() (string, error) {
 	var err error
 	if c.UserConfig().OS.CopyToClipboardCmd != "" {
 		cmdStr := c.UserConfig().OS.ReadFromClipboardCmd
-		s, err = c.Cmd.NewShell(cmdStr).RunWithOutput()
+		s, err = c.Cmd.NewShell(cmdStr, c.UserConfig().OS.ShellFunctionsFile).RunWithOutput()
 	} else {
 		s, err = clipboard.ReadAll()
 	}
@@ -333,6 +326,35 @@ func (c *OSCommand) RemoveFile(path string) error {
 	return c.removeFileFn(path)
 }
 
+func (c *OSCommand) IsDirEmpty(path string) (bool, error) {
+	return c.isDirEmptyFn(path)
+}
+
+func (c *OSCommand) RemoveDir(path string) error {
+	msg := utils.ResolvePlaceholderString(
+		c.Tr.Log.RemoveEmptyDir,
+		map[string]string{
+			"path": path,
+		},
+	)
+	c.LogCommand(msg, false)
+
+	return c.removeDirFn(path)
+}
+
+func isDirEmpty(path string) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	_, err = f.Readdirnames(1)
+	_ = f.Close()
+	if errors.Is(err, io.EOF) {
+		return true, nil
+	}
+	return false, err
+}
+
 func (c *OSCommand) Getenv(key string) string {
 	return c.getenvFn(key)
 }
@@ -348,16 +370,4 @@ func GetLazygitPath() string {
 		ex = os.Args[0] // fallback to the first call argument if needed
 	}
 	return `"` + filepath.ToSlash(ex) + `"`
-}
-
-func (c *OSCommand) UpdateWindowTitle() error {
-	if c.Platform.OS != "windows" {
-		return nil
-	}
-	path, getWdErr := os.Getwd()
-	if getWdErr != nil {
-		return getWdErr
-	}
-	argString := fmt.Sprint("title ", filepath.Base(path), " - Lazygit")
-	return c.Cmd.NewShell(argString).Run()
 }

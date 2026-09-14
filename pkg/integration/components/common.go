@@ -1,5 +1,7 @@
 package components
 
+import "fmt"
+
 // for running common actions
 type Common struct {
 	t *TestDriver
@@ -36,6 +38,14 @@ func (self *Common) AbortMerge() {
 		Confirm()
 }
 
+// PretendMergeOrRebaseStartedInLazygit tells lazygit to treat the in-progress
+// rebase/merge/etc. as one that it started, so that it will prompt to continue
+// once the conflicts are resolved. Use it when a test sets up an operation by
+// running git directly rather than through lazygit's UI.
+func (self *Common) PretendMergeOrRebaseStartedInLazygit() {
+	self.t.gui.PretendMergeOrRebaseStartedInLazygit()
+}
+
 func (self *Common) AcknowledgeConflicts() {
 	self.t.ExpectPopup().Menu().
 		Title(Equals("Conflicts!")).
@@ -43,10 +53,10 @@ func (self *Common) AcknowledgeConflicts() {
 		Confirm()
 }
 
-func (self *Common) ContinueOnConflictsResolved() {
+func (self *Common) ContinueOnConflictsResolved(command string) {
 	self.t.ExpectPopup().Confirmation().
 		Title(Equals("Continue")).
-		Content(Contains("All merge conflicts resolved. Continue?")).
+		Content(Contains(fmt.Sprintf("All merge conflicts resolved. Continue the %s?", command))).
 		Confirm()
 }
 

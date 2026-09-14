@@ -4,13 +4,26 @@ import (
 	. "github.com/jesseduffield/lazygit/pkg/integration/components"
 )
 
-func handleConflictsFromSwap(t *TestDriver) {
+func handleConflictsFromSwap(t *TestDriver, expectedCommand string, selectConflict bool) {
 	t.Common().AcknowledgeConflicts()
+
+	// If the conflict comes from directly moving a commit, we want to keep the moved commit
+	// selected, so selectConflict is false. In other cases (e.g. a conflict after "continue
+	// rebase") we want to select the conflict commit.
+	commitTwoMatcher := Contains("pick").Contains("commit two")
+	conflictMatcher := Contains(expectedCommand).Contains("<-- CONFLICT --- commit three")
+	if selectConflict {
+		conflictMatcher.IsSelected()
+	} else {
+		commitTwoMatcher.IsSelected()
+	}
 
 	t.Views().Commits().
 		Lines(
-			Contains("pick").Contains("commit two"),
-			Contains("conflict").Contains("<-- YOU ARE HERE --- commit three"),
+			Contains("─── Pending rebase todos"),
+			commitTwoMatcher,
+			conflictMatcher,
+			Contains("─── Commits"),
 			Contains("commit one"),
 		)
 
@@ -33,7 +46,7 @@ func handleConflictsFromSwap(t *TestDriver) {
 		SelectNextItem().
 		PressPrimaryAction() // pick "three"
 
-	t.Common().ContinueOnConflictsResolved()
+	t.Common().ContinueOnConflictsResolved("rebase")
 
 	t.Common().AcknowledgeConflicts()
 
@@ -56,7 +69,7 @@ func handleConflictsFromSwap(t *TestDriver) {
 		SelectNextItem().
 		PressPrimaryAction() // pick "two"
 
-	t.Common().ContinueOnConflictsResolved()
+	t.Common().ContinueOnConflictsResolved("rebase")
 
 	t.Views().Commits().
 		Focus().

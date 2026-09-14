@@ -1,7 +1,9 @@
 package controllers
 
 import (
-	"github.com/jesseduffield/gocui"
+	"fmt"
+
+	"github.com/jesseduffield/lazygit/pkg/gocui"
 	"github.com/jesseduffield/lazygit/pkg/gui/types"
 	"github.com/samber/lo"
 )
@@ -25,27 +27,37 @@ func NewPatchBuildingController(
 func (self *PatchBuildingController) GetKeybindings(opts types.KeybindingsOpts) []*types.Binding {
 	return []*types.Binding{
 		{
-			Key:         opts.GetKey(opts.Config.Universal.OpenFile),
+			Keys:        opts.GetKeys(opts.Config.Universal.OpenFile),
 			Handler:     self.OpenFile,
 			Description: self.c.Tr.OpenFile,
 			Tooltip:     self.c.Tr.OpenFileTooltip,
 		},
 		{
-			Key:         opts.GetKey(opts.Config.Universal.Edit),
+			Keys:        opts.GetKeys(opts.Config.Universal.Edit),
 			Handler:     self.EditFile,
 			Description: self.c.Tr.EditFile,
 			Tooltip:     self.c.Tr.EditFileTooltip,
 		},
 		{
-			Key:             opts.GetKey(opts.Config.Universal.Select),
+			Keys:            opts.GetKeys(opts.Config.Universal.Select),
 			Handler:         self.ToggleSelectionAndRefresh,
 			Description:     self.c.Tr.ToggleSelectionForPatch,
 			DisplayOnScreen: true,
 		},
 		{
-			Key:         opts.GetKey(opts.Config.Universal.Return),
-			Handler:     self.Escape,
-			Description: self.c.Tr.ExitCustomPatchBuilder,
+			Keys:              opts.GetKeys(opts.Config.Universal.Remove),
+			Handler:           self.discardSelection,
+			GetDisabledReason: self.getDisabledReasonForDiscard,
+			Description:       self.c.Tr.RemoveSelectionFromPatch,
+			Tooltip:           self.c.Tr.RemoveSelectionFromPatchTooltip,
+			DisplayOnScreen:   true,
+		},
+		{
+			Keys:            opts.GetKeys(opts.Config.Universal.Return),
+			Handler:         self.Escape,
+			Description:     self.c.Tr.ExitCustomPatchBuilder,
+			DescriptionFunc: self.EscapeDescription,
+			DisplayOnScreen: true,
 		},
 	}
 }
@@ -62,24 +74,24 @@ func (self *PatchBuildingController) GetMouseKeybindings(opts types.KeybindingsO
 	return []*gocui.ViewMouseBinding{}
 }
 
-func (self *PatchBuildingController) GetOnFocus() func(types.OnFocusOpts) error {
-	return func(opts types.OnFocusOpts) error {
+func (self *PatchBuildingController) GetOnFocus() func(types.OnFocusOpts) {
+	return func(opts types.OnFocusOpts) {
 		// no need to change wrap on the secondary view because it can't be interacted with
-		self.c.Views().PatchBuilding.Wrap = false
+		self.c.Views().PatchBuilding.Wrap = self.c.UserConfig().Gui.WrapLinesInStagingView
 
-		return self.c.Helpers().PatchBuilding.RefreshPatchBuildingPanel(opts)
+		self.c.Helpers().PatchBuilding.RefreshPatchBuildingPanel(opts)
 	}
 }
 
-func (self *PatchBuildingController) GetOnFocusLost() func(types.OnFocusLostOpts) error {
-	return func(opts types.OnFocusLostOpts) error {
+func (self *PatchBuildingController) GetOnFocusLost() func(types.OnFocusLostOpts) {
+	return func(opts types.OnFocusLostOpts) {
+		self.context().SetState(nil)
+
 		self.c.Views().PatchBuilding.Wrap = true
 
 		if self.c.Git().Patch.PatchBuilder.IsEmpty() {
 			self.c.Git().Patch.PatchBuilder.Reset()
 		}
-
-		return nil
 	}
 }
 
@@ -107,6 +119,7 @@ func (self *PatchBuildingController) EditFile() error {
 	}
 
 	lineNumber := self.context().GetState().CurrentLineNumber()
+	lineNumber = self.c.Helpers().Diff.AdjustLineNumber(path, lineNumber, self.context().GetViewName())
 	return self.c.Helpers().Files.EditFileAtLine(path, lineNumber)
 }
 
@@ -115,36 +128,43 @@ func (self *PatchBuildingController) ToggleSelectionAndRefresh() error {
 		return err
 	}
 
-	return self.c.Refresh(types.RefreshOptions{
+	self.c.Refresh(types.RefreshOptions{
 		Scope: []types.RefreshableView{types.PATCH_BUILDING, types.COMMIT_FILES},
 	})
+	return nil
 }
 
 func (self *PatchBuildingController) toggleSelection() error {
 	self.context().GetMutex().Lock()
 	defer self.context().GetMutex().Unlock()
 
-	toggleFunc := self.c.Git().Patch.PatchBuilder.AddFileLineRange
-	filename := self.c.Contexts().CommitFiles.GetSelectedPath()
-	if filename == "" {
+	file := self.c.Contexts().CommitFiles.GetSelectedFile()
+	if file == nil {
 		return nil
 	}
 
 	state := self.context().GetState()
 
-	includedLineIndices, err := self.c.Git().Patch.PatchBuilder.GetFileIncLineIndices(filename)
+	// Get added/deleted lines in the selected patch range
+	lineIndicesToToggle := state.LineIndicesOfAddedOrDeletedLinesInSelectedPatchRange()
+	if len(lineIndicesToToggle) == 0 {
+		// Only context lines or header lines selected, so nothing to do
+		return nil
+	}
+
+	includedLineIndices, err := self.c.Git().Patch.PatchBuilder.GetFileIncLineIndices(file.Path, file.PreviousPath)
 	if err != nil {
 		return err
 	}
-	currentLineIsStaged := lo.Contains(includedLineIndices, state.GetSelectedLineIdx())
-	if currentLineIsStaged {
+
+	toggleFunc := self.c.Git().Patch.PatchBuilder.AddFileLineRange
+	firstSelectedChangeLineIsStaged := lo.Contains(includedLineIndices, lineIndicesToToggle[0])
+	if firstSelectedChangeLineIsStaged {
 		toggleFunc = self.c.Git().Patch.PatchBuilder.RemoveFileLineRange
 	}
 
 	// add range of lines to those set for the file
-	firstLineIdx, lastLineIdx := state.SelectedRange()
-
-	if err := toggleFunc(filename, firstLineIdx, lastLineIdx); err != nil {
+	if err := toggleFunc(file.Path, file.PreviousPath, lineIndicesToToggle); err != nil {
 		// might actually want to return an error here
 		self.c.Log.Error(err)
 	}
@@ -153,17 +173,105 @@ func (self *PatchBuildingController) toggleSelection() error {
 		state.SetLineSelectMode()
 	}
 
+	state.SelectNextStageableLineOfSameIncludedState(self.context().GetIncludedLineIndices(), firstSelectedChangeLineIsStaged)
+
 	return nil
+}
+
+func (self *PatchBuildingController) getDisabledReasonForDiscard() *types.DisabledReason {
+	if !self.c.Git().Patch.PatchBuilder.CanRebase {
+		return &types.DisabledReason{Text: self.c.Tr.CanOnlyDiscardFromLocalCommits, ShowErrorInPanel: true}
+	}
+	if self.c.Git().Status.WorkingTreeState().Any() {
+		return &types.DisabledReason{Text: self.c.Tr.CantPatchWhileRebasingError, ShowErrorInPanel: true}
+	}
+	if self.c.UserConfig().Git.DiffContextSize == 0 {
+		text := fmt.Sprintf(self.c.Tr.Actions.NotEnoughContextToRemoveLines,
+			self.c.UserConfig().Keybinding.Universal.IncreaseContextInDiffView)
+		return &types.DisabledReason{Text: text, ShowErrorInPanel: true}
+	}
+	return nil
+}
+
+func (self *PatchBuildingController) discardSelection() error {
+	prompt := lo.Ternary(self.c.Git().Patch.PatchBuilder.IsEmpty(),
+		self.c.Tr.DiscardLinesFromCommitPrompt,
+		self.c.Tr.DiscardLinesFromCommitPromptWithReset)
+
+	self.c.Confirm(types.ConfirmOpts{
+		Title:  self.c.Tr.DiscardLinesFromCommitTitle,
+		Prompt: prompt,
+		HandleConfirm: func() error {
+			return self.discardSelectionFromCommit()
+		},
+	})
+
+	return nil
+}
+
+func (self *PatchBuildingController) discardSelectionFromCommit() error {
+	// Reset the current patch if there is one.
+	if !self.c.Git().Patch.PatchBuilder.IsEmpty() {
+		self.c.Git().Patch.PatchBuilder.Reset()
+	}
+
+	if err := self.toggleSelection(); err != nil {
+		return err
+	}
+
+	if self.c.Git().Patch.PatchBuilder.IsEmpty() {
+		return nil
+	}
+
+	commits := self.c.Model().Commits
+	commitIndex := self.getPatchCommitIndex()
+	return self.c.WithWaitingStatus(self.c.Tr.RebasingStatus, func(gocui.Task) error {
+		self.c.LogAction(self.c.Tr.Actions.RemovePatchFromCommit)
+		err := self.c.Git().Patch.DeletePatchesFromCommit(commits, commitIndex)
+		// Escape pops the patch-building context, so run it on the UI thread
+		// before the refresh below.
+		_ = self.c.GocuiGui().OnUIThreadAndWait(func() {
+			self.c.Helpers().PatchBuilding.Escape()
+		})
+		return self.c.Helpers().MergeAndRebase.CheckMergeOrRebaseWithRefreshOptions(
+			err, types.RefreshOptions{})
+	})
+}
+
+func (self *PatchBuildingController) getPatchCommitIndex() int {
+	for index, commit := range self.c.Model().Commits {
+		if commit.Hash() == self.c.Git().Patch.PatchBuilder.To {
+			return index
+		}
+	}
+	return -1
 }
 
 func (self *PatchBuildingController) Escape() error {
 	context := self.c.Contexts().CustomPatchBuilder
 	state := context.GetState()
 
-	if state.SelectingRange() || state.SelectingHunk() {
+	if state.SelectingRange() || state.SelectingHunkEnabledByUser() {
 		state.SetLineSelectMode()
-		return self.c.PostRefreshUpdate(context)
+		self.c.PostRefreshUpdate(context)
+		return nil
 	}
 
-	return self.c.Helpers().PatchBuilding.Escape()
+	self.c.Helpers().PatchBuilding.Escape()
+	return nil
+}
+
+func (self *PatchBuildingController) EscapeDescription() string {
+	context := self.c.Contexts().CustomPatchBuilder
+	if state := context.GetState(); state != nil {
+		if state.SelectingRange() {
+			return self.c.Tr.DismissRangeSelect
+		}
+
+		if state.SelectingHunkEnabledByUser() {
+			return self.c.Tr.SelectLineByLine
+		}
+	}
+
+	return self.c.Tr.ExitCustomPatchBuilder
 }

@@ -15,10 +15,9 @@ var GlobalContext = NewIntegrationTest(NewIntegrationTestArgs{
 	SetupConfig: func(cfg *config.AppConfig) {
 		cfg.GetUserConfig().CustomCommands = []config.CustomCommand{
 			{
-				Key:        "X",
-				Context:    "global",
-				Command:    "touch myfile",
-				ShowOutput: false,
+				Key:     config.Keybinding{"X"},
+				Context: "global",
+				Command: "touch myfile",
 			},
 		}
 	},
@@ -26,7 +25,7 @@ var GlobalContext = NewIntegrationTest(NewIntegrationTestArgs{
 		// commits
 		t.Views().Commits().
 			Focus().
-			Press("X")
+			Press(config.Keybinding{"X"})
 
 		t.Views().Files().
 			Focus().
@@ -38,7 +37,7 @@ var GlobalContext = NewIntegrationTest(NewIntegrationTestArgs{
 		// branches
 		t.Views().Branches().
 			Focus().
-			Press("X")
+			Press(config.Keybinding{"X"})
 
 		t.Views().Files().
 			Focus().
@@ -50,7 +49,7 @@ var GlobalContext = NewIntegrationTest(NewIntegrationTestArgs{
 		// files
 		t.Views().Files().
 			Focus().
-			Press("X")
+			Press(config.Keybinding{"X"})
 
 		t.Views().Files().
 			Focus().

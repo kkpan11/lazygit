@@ -4,21 +4,22 @@ import (
 	"bufio"
 	"bytes"
 	"io"
+	"os/exec"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/go-errors/errors"
-	"github.com/jesseduffield/gocui"
 	"github.com/jesseduffield/lazygit/pkg/utils"
+	"github.com/sasha-s/go-deadlock"
 	"github.com/sirupsen/logrus"
 )
 
 type ICmdObjRunner interface {
-	Run(cmdObj ICmdObj) error
-	RunWithOutput(cmdObj ICmdObj) (string, error)
-	RunWithOutputs(cmdObj ICmdObj) (string, string, error)
-	RunAndProcessLines(cmdObj ICmdObj, onLine func(line string) (bool, error)) error
+	Run(cmdObj *CmdObj) error
+	RunWithOutput(cmdObj *CmdObj) (string, error)
+	RunWithOutputs(cmdObj *CmdObj) (string, string, error)
+	RunAndProcessLines(cmdObj *CmdObj, onLine func(line string) (bool, error)) error
 }
 
 type cmdObjRunner struct {
@@ -28,7 +29,7 @@ type cmdObjRunner struct {
 
 var _ ICmdObjRunner = &cmdObjRunner{}
 
-func (self *cmdObjRunner) Run(cmdObj ICmdObj) error {
+func (self *cmdObjRunner) Run(cmdObj *CmdObj) error {
 	if cmdObj.Mutex() != nil {
 		cmdObj.Mutex().Lock()
 		defer cmdObj.Mutex().Unlock()
@@ -46,7 +47,7 @@ func (self *cmdObjRunner) Run(cmdObj ICmdObj) error {
 	return err
 }
 
-func (self *cmdObjRunner) RunWithOutput(cmdObj ICmdObj) (string, error) {
+func (self *cmdObjRunner) RunWithOutput(cmdObj *CmdObj) (string, error) {
 	if cmdObj.Mutex() != nil {
 		cmdObj.Mutex().Lock()
 		defer cmdObj.Mutex().Unlock()
@@ -71,7 +72,7 @@ func (self *cmdObjRunner) RunWithOutput(cmdObj ICmdObj) (string, error) {
 	return self.RunWithOutputAux(cmdObj)
 }
 
-func (self *cmdObjRunner) RunWithOutputs(cmdObj ICmdObj) (string, string, error) {
+func (self *cmdObjRunner) RunWithOutputs(cmdObj *CmdObj) (string, string, error) {
 	if cmdObj.Mutex() != nil {
 		cmdObj.Mutex().Lock()
 		defer cmdObj.Mutex().Unlock()
@@ -96,7 +97,7 @@ func (self *cmdObjRunner) RunWithOutputs(cmdObj ICmdObj) (string, string, error)
 	return self.RunWithOutputsAux(cmdObj)
 }
 
-func (self *cmdObjRunner) RunWithOutputAux(cmdObj ICmdObj) (string, error) {
+func (self *cmdObjRunner) RunWithOutputAux(cmdObj *CmdObj) (string, error) {
 	self.log.WithField("command", cmdObj.ToString()).Debug("RunCommand")
 
 	if cmdObj.ShouldLog() {
@@ -104,17 +105,23 @@ func (self *cmdObjRunner) RunWithOutputAux(cmdObj ICmdObj) (string, error) {
 	}
 
 	t := time.Now()
-	output, err := sanitisedCommandOutput(cmdObj.GetCmd().CombinedOutput())
+	cmd := cmdObj.GetCmd()
+	output, err := sanitisedCommandOutput(cmd.CombinedOutput())
 	if err != nil {
 		self.log.WithField("command", cmdObj.ToString()).Error(output)
 	}
 
-	self.log.Infof("%s (%s)", cmdObj.ToString(), time.Since(t))
+	wall := time.Since(t)
+	if ps := cmd.ProcessState; ps != nil {
+		self.log.Infof("%s (wall %s, cpu %s)", cmdObj.ToString(), wall, ps.UserTime()+ps.SystemTime())
+	} else {
+		self.log.Infof("%s (wall %s)", cmdObj.ToString(), wall)
+	}
 
 	return output, err
 }
 
-func (self *cmdObjRunner) RunWithOutputsAux(cmdObj ICmdObj) (string, string, error) {
+func (self *cmdObjRunner) RunWithOutputsAux(cmdObj *CmdObj) (string, string, error) {
 	self.log.WithField("command", cmdObj.ToString()).Debug("RunCommand")
 
 	if cmdObj.ShouldLog() {
@@ -139,7 +146,7 @@ func (self *cmdObjRunner) RunWithOutputsAux(cmdObj ICmdObj) (string, string, err
 	return stdout, stderr, err
 }
 
-func (self *cmdObjRunner) RunAndProcessLines(cmdObj ICmdObj, onLine func(line string) (bool, error)) error {
+func (self *cmdObjRunner) RunAndProcessLines(cmdObj *CmdObj, onLine func(line string) (bool, error)) error {
 	if cmdObj.Mutex() != nil {
 		cmdObj.Mutex().Lock()
 		defer cmdObj.Mutex().Unlock()
@@ -170,16 +177,17 @@ func (self *cmdObjRunner) RunAndProcessLines(cmdObj ICmdObj, onLine func(line st
 		line := scanner.Text()
 		stop, err := onLine(line)
 		if err != nil {
+			stdoutPipe.Close()
 			return err
 		}
 		if stop {
-			_ = Kill(cmd)
+			stdoutPipe.Close() // close the pipe so that the called process terminates
 			break
 		}
 	}
 
 	if scanner.Err() != nil {
-		_ = Kill(cmd)
+		stdoutPipe.Close()
 		return scanner.Err()
 	}
 
@@ -190,7 +198,7 @@ func (self *cmdObjRunner) RunAndProcessLines(cmdObj ICmdObj, onLine func(line st
 	return nil
 }
 
-func (self *cmdObjRunner) logCmdObj(cmdObj ICmdObj) {
+func (self *cmdObjRunner) logCmdObj(cmdObj *CmdObj) {
 	self.guiIO.logCommandFn(cmdObj.ToString(), true)
 }
 
@@ -211,21 +219,33 @@ type cmdHandler struct {
 	stdoutPipe io.Reader
 	stdinPipe  io.Writer
 	close      func() error
+	// wait blocks until the child process exits. Needed as a separate
+	// field because the pty path on Windows spawns via CreateProcess and
+	// never runs *exec.Cmd.Start — so cmd.Wait wouldn't work there.
+	wait func() error
 }
 
-func (self *cmdObjRunner) runAndStream(cmdObj ICmdObj) error {
+func (self *cmdObjRunner) runAndStream(cmdObj *CmdObj) error {
 	return self.runAndStreamAux(cmdObj, func(handler *cmdHandler, cmdWriter io.Writer) {
-		go func() {
-			_, _ = io.Copy(cmdWriter, handler.stdoutPipe)
-		}()
+		_, _ = io.Copy(cmdWriter, handler.stdoutPipe)
 	})
 }
 
 func (self *cmdObjRunner) runAndStreamAux(
-	cmdObj ICmdObj,
+	cmdObj *CmdObj,
 	onRun func(*cmdHandler, io.Writer),
 ) error {
-	cmdWriter := self.guiIO.newCmdWriterFn()
+	var cmdWriter io.Writer
+	var combinedOutput bytes.Buffer
+	if cmdObj.ShouldSuppressOutputUnlessError() {
+		cmdWriter = &combinedOutput
+	} else {
+		cmdWriter = self.guiIO.newCmdWriterFn()
+	}
+	// The command's stdout and stderr are streamed to cmdWriter concurrently
+	// from separate goroutines (stderr via the MultiWriter below, stdout via
+	// onRun), so it must be safe for concurrent writes.
+	cmdWriter = &synchronizedWriter{writer: cmdWriter}
 
 	if cmdObj.ShouldLog() {
 		self.logCmdObj(cmdObj)
@@ -236,7 +256,13 @@ func (self *cmdObjRunner) runAndStreamAux(
 	var stderr bytes.Buffer
 	cmd.Stderr = io.MultiWriter(cmdWriter, &stderr)
 
-	handler, err := self.getCmdHandler(cmd)
+	var handler *cmdHandler
+	var err error
+	if cmdObj.ShouldUsePty() {
+		handler, err = self.getCmdHandlerPty(cmd)
+	} else {
+		handler, err = self.getCmdHandlerNonPty(cmd)
+	}
 	if err != nil {
 		return err
 	}
@@ -252,13 +278,36 @@ func (self *cmdObjRunner) runAndStreamAux(
 
 	t := time.Now()
 
-	onRun(handler, cmdWriter)
+	// Stream the command's output on a goroutine while it runs, but keep a
+	// handle on it: the buffers it fills (stdout, and combinedOutput when
+	// output is suppressed) must not be read below until it has finished.
+	streamingDone := make(chan struct{})
+	go utils.Safe(func() {
+		defer close(streamingDone)
+		onRun(handler, cmdWriter)
+	})
 
-	err = cmd.Wait()
+	err = handler.wait()
+
+	// The command has exited; wait for the streaming goroutine to drain the
+	// last of its output before reading those buffers. A pty reader reaches
+	// EOF on its own now the process is gone, but the non-pty pipe never does,
+	// so close it to unblock the reader — the pipe is synchronous, so all
+	// output has already been read by now and nothing is lost.
+	if !cmdObj.ShouldUsePty() {
+		if closeErr := handler.close(); closeErr != nil {
+			self.log.Error(closeErr)
+		}
+	}
+	<-streamingDone
 
 	self.log.Infof("%s (%s)", cmdObj.ToString(), time.Since(t))
 
 	if err != nil {
+		if cmdObj.suppressOutputUnlessError {
+			_, _ = self.guiIO.newCmdWriterFn().Write(combinedOutput.Bytes())
+		}
+
 		errStr := stderr.String()
 		if errStr != "" {
 			return errors.New(errStr)
@@ -287,17 +336,13 @@ const (
 	Token
 )
 
-// Whenever we're asked for a password we just enter a newline, which will
-// eventually cause the command to fail.
+// Whenever we're asked for a password we return a nil channel to tell the
+// caller to kill the process.
 var failPromptFn = func(CredentialType) <-chan string {
-	ch := make(chan string)
-	go func() {
-		ch <- "\n"
-	}()
-	return ch
+	return nil
 }
 
-func (self *cmdObjRunner) runWithCredentialHandling(cmdObj ICmdObj) error {
+func (self *cmdObjRunner) runWithCredentialHandling(cmdObj *CmdObj) error {
 	promptFn, err := self.getCredentialPromptFn(cmdObj)
 	if err != nil {
 		return err
@@ -306,7 +351,7 @@ func (self *cmdObjRunner) runWithCredentialHandling(cmdObj ICmdObj) error {
 	return self.runAndDetectCredentialRequest(cmdObj, promptFn)
 }
 
-func (self *cmdObjRunner) getCredentialPromptFn(cmdObj ICmdObj) (func(CredentialType) <-chan string, error) {
+func (self *cmdObjRunner) getCredentialPromptFn(cmdObj *CmdObj) (func(CredentialType) <-chan string, error) {
 	switch cmdObj.GetCredentialStrategy() {
 	case PROMPT:
 		return self.guiIO.promptForCredentialFn, nil
@@ -322,18 +367,15 @@ func (self *cmdObjRunner) getCredentialPromptFn(cmdObj ICmdObj) (func(Credential
 // promptUserForCredential is a function that gets executed when this function detect you need to fill in a password or passphrase
 // The promptUserForCredential argument will be "username", "password" or "passphrase" and expects the user's password/passphrase or username back
 func (self *cmdObjRunner) runAndDetectCredentialRequest(
-	cmdObj ICmdObj,
+	cmdObj *CmdObj,
 	promptUserForCredential func(CredentialType) <-chan string,
 ) error {
 	// setting the output to english so we can parse it for a username/password request
-	cmdObj.AddEnvVars("LANG=en_US.UTF-8", "LC_ALL=en_US.UTF-8")
+	cmdObj.AddEnvVars("LANG=C", "LC_ALL=C", "LC_MESSAGES=C")
 
 	return self.runAndStreamAux(cmdObj, func(handler *cmdHandler, cmdWriter io.Writer) {
 		tr := io.TeeReader(handler.stdoutPipe, cmdWriter)
-
-		go utils.Safe(func() {
-			self.processOutput(tr, handler.stdinPipe, promptUserForCredential, cmdObj.GetTask())
-		})
+		self.processOutput(tr, handler.stdinPipe, promptUserForCredential, handler.close, cmdObj)
 	})
 }
 
@@ -341,9 +383,11 @@ func (self *cmdObjRunner) processOutput(
 	reader io.Reader,
 	writer io.Writer,
 	promptUserForCredential func(CredentialType) <-chan string,
-	task gocui.Task,
+	closeFunc func() error,
+	cmdObj *CmdObj,
 ) {
 	checkForCredentialRequest := self.getCheckForCredentialRequestFunc()
+	task := cmdObj.GetTask()
 
 	scanner := bufio.NewScanner(reader)
 	scanner.Split(bufio.ScanBytes)
@@ -352,6 +396,15 @@ func (self *cmdObjRunner) processOutput(
 		askFor, ok := checkForCredentialRequest(newBytes)
 		if ok {
 			responseChan := promptUserForCredential(askFor)
+			if responseChan == nil {
+				// Returning a nil channel means we should terminate the process.
+				// We achieve this by closing the pty that it's running in.
+				if err := closeFunc(); err != nil {
+					self.log.Error(err)
+				}
+				break
+			}
+
 			if task != nil {
 				task.Pause()
 			}
@@ -365,6 +418,10 @@ func (self *cmdObjRunner) processOutput(
 			}
 		}
 	}
+
+	if err := scanner.Err(); err != nil {
+		self.log.Error(err)
+	}
 }
 
 // having a function that returns a function because we need to maintain some state inbetween calls hence the closure
@@ -377,6 +434,7 @@ func (self *cmdObjRunner) getCheckForCredentialRequestFunc() func([]byte) (Crede
 		`Username\s*for\s*'.+':`:                 Username,
 		`Enter\s*passphrase\s*for\s*key\s*'.+':`: Passphrase,
 		`Enter\s*PIN\s*for\s*.+\s*key\s*.+:`:     PIN,
+		`Enter\s*PIN\s*for\s*'.+':`:              PIN,
 		`.*2FA Token.*`:                          Token,
 	}
 
@@ -409,4 +467,72 @@ func (self *cmdObjRunner) getCheckForCredentialRequestFunc() func([]byte) (Crede
 		}
 		return 0, false
 	}
+}
+
+// synchronizedWriter serializes writes to its underlying writer so that it can
+// be written from multiple goroutines at once (see runAndStreamAux, which
+// streams a command's stdout and stderr to one writer from two goroutines).
+type synchronizedWriter struct {
+	mutex  deadlock.Mutex
+	writer io.Writer
+}
+
+func (self *synchronizedWriter) Write(p []byte) (int, error) {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	return self.writer.Write(p)
+}
+
+type Buffer struct {
+	b bytes.Buffer
+	m deadlock.Mutex
+}
+
+func (b *Buffer) Read(p []byte) (n int, err error) {
+	b.m.Lock()
+	defer b.m.Unlock()
+	return b.b.Read(p)
+}
+
+func (b *Buffer) Write(p []byte) (n int, err error) {
+	b.m.Lock()
+	defer b.m.Unlock()
+	return b.b.Write(p)
+}
+
+func (self *cmdObjRunner) getCmdHandlerNonPty(cmd *exec.Cmd) (*cmdHandler, error) {
+	stdoutReader, stdoutWriter := io.Pipe()
+	cmd.Stdout = stdoutWriter
+
+	buf := &Buffer{}
+	cmd.Stdin = buf
+
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+
+	return &cmdHandler{
+		stdoutPipe: stdoutReader,
+		stdinPipe:  buf,
+		// Closing the read end makes a blocked read on it return, which is how
+		// runAndStreamAux unblocks and joins the streaming goroutine once the
+		// command has finished (the pipe delivers no EOF of its own).
+		close: func() error { return stdoutReader.Close() },
+		wait:  cmd.Wait,
+	}, nil
+}
+
+func (self *cmdObjRunner) getCmdHandlerPty(cmd *exec.Cmd) (*cmdHandler, error) {
+	// Size will be adjusted by the caller if it cares; this just avoids a
+	// zero-size pty.
+	sp, err := StartPty(cmd, 80, 24)
+	if err != nil {
+		return nil, err
+	}
+	return &cmdHandler{
+		stdoutPipe: sp.Pty,
+		stdinPipe:  sp.Pty,
+		close:      sp.Pty.Close,
+		wait:       sp.Wait,
+	}, nil
 }

@@ -1,7 +1,8 @@
 package context
 
 import (
-	"github.com/jesseduffield/gocui"
+	"fmt"
+
 	"github.com/jesseduffield/lazygit/pkg/commands/models"
 	"github.com/jesseduffield/lazygit/pkg/gui/filetree"
 	"github.com/jesseduffield/lazygit/pkg/gui/presentation"
@@ -15,19 +16,18 @@ type CommitFilesContext struct {
 	*filetree.CommitFileTreeViewModel
 	*ListContextTrait
 	*DynamicTitleBuilder
-	*SearchTrait
 }
 
 var (
 	_ types.IListContext       = (*CommitFilesContext)(nil)
 	_ types.DiffableContext    = (*CommitFilesContext)(nil)
-	_ types.ISearchableContext = (*CommitFilesContext)(nil)
+	_ types.IFilterableContext = (*CommitFilesContext)(nil)
 )
 
 func NewCommitFilesContext(c *ContextCommon) *CommitFilesContext {
 	viewModel := filetree.NewCommitFileTreeViewModel(
 		func() []*models.CommitFile { return c.Model().CommitFiles },
-		c.Log,
+		c.Common,
 		c.UserConfig().Gui.ShowFileTree,
 	)
 
@@ -37,7 +37,7 @@ func NewCommitFilesContext(c *ContextCommon) *CommitFilesContext {
 		}
 
 		showFileIcons := icons.IsIconEnabled() && c.UserConfig().Gui.ShowFileIcons
-		lines := presentation.RenderCommitFileTree(viewModel, c.Git().Patch.PatchBuilder, showFileIcons)
+		lines := presentation.RenderCommitFileTree(viewModel, c.Git().Patch.PatchBuilder, showFileIcons, &c.UserConfig().Gui.CustomIcons)
 		return lo.Map(lines, func(line string, _ int) []string {
 			return []string{line}
 		})
@@ -46,7 +46,6 @@ func NewCommitFilesContext(c *ContextCommon) *CommitFilesContext {
 	ctx := &CommitFilesContext{
 		CommitFileTreeViewModel: viewModel,
 		DynamicTitleBuilder:     NewDynamicTitleBuilder(c.Tr.CommitFilesDynamicTitle),
-		SearchTrait:             NewSearchTrait(c),
 		ListContextTrait: &ListContextTrait{
 			Context: NewSimpleContext(
 				NewBaseContext(NewBaseContextOpts{
@@ -66,8 +65,6 @@ func NewCommitFilesContext(c *ContextCommon) *CommitFilesContext {
 		},
 	}
 
-	ctx.GetView().SetOnSelectItem(ctx.SearchTrait.onSelectItemWrapper(ctx.OnSearchSelect))
-
 	return ctx
 }
 
@@ -75,6 +72,28 @@ func (self *CommitFilesContext) GetDiffTerminals() []string {
 	return []string{self.GetRef().RefName()}
 }
 
-func (self *CommitFilesContext) ModelSearchResults(searchStr string, caseSensitive bool) []gocui.SearchPosition {
-	return nil
+func (self *CommitFilesContext) RefForAdjustingLineNumberInDiff() string {
+	if refs := self.GetRefRange(); refs != nil {
+		return refs.To.RefName()
+	}
+	return self.GetRef().RefName()
+}
+
+func (self *CommitFilesContext) GetFromAndToForDiff() (string, string) {
+	if refs := self.GetRefRange(); refs != nil {
+		return refs.From.ParentRefName(), refs.To.RefName()
+	}
+	ref := self.GetRef()
+	return ref.ParentRefName(), ref.RefName()
+}
+
+func (self *CommitFilesContext) ReInit(ref models.Ref, refRange *types.RefRange) {
+	self.SetRef(ref)
+	self.SetRefRange(refRange)
+	if refRange != nil {
+		self.SetTitleRef(fmt.Sprintf("%s-%s", refRange.From.ShortRefName(), refRange.To.ShortRefName()))
+	} else {
+		self.SetTitleRef(ref.Description())
+	}
+	self.GetView().Title = self.Title()
 }
